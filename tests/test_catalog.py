@@ -42,7 +42,10 @@ async def test_anthropic_list_parses_capabilities() -> None:
                             "high": {"supported": True},
                             "max": {"supported": False},
                         },
-                        "thinking": {"supported": True},
+                        "thinking": {
+                            "supported": True,
+                            "types": {"adaptive": {"supported": True}},
+                        },
                     },
                 }
             ],
@@ -50,7 +53,21 @@ async def test_anthropic_list_parses_capabilities() -> None:
             "last_id": "claude-opus-5-5",
         },
         "claude-opus-5-5": {
-            "data": [{"id": "claude-x", "capabilities": {"thinking": {"supported": False}}}],
+            "data": [
+                {"id": "claude-x", "capabilities": {"thinking": {"supported": False}}},
+                {
+                    "id": "claude-budget",
+                    "capabilities": {
+                        "thinking": {
+                            "supported": True,
+                            "types": {
+                                "adaptive": {"supported": False},
+                                "enabled": {"supported": True},
+                            },
+                        }
+                    },
+                },
+            ],
             "has_more": False,
         },
     }
@@ -60,12 +77,13 @@ async def test_anthropic_list_parses_capabilities() -> None:
         return httpx.Response(200, json=pages[request.url.params.get("after_id")])
 
     models = await list_models(Provider("anthropic", SecretStr("k")), transport=_transport(handler))
-    opus, other = models
+    opus, other, budget = models
     assert opus.efforts == ("low", "high")
     assert opus.thinking is True
     assert opus.context == 500000
     assert opus.input_per_mtok == Decimal("4.00")  # price merged from FALLBACK
     assert other.efforts == () and other.thinking is False
+    assert budget.thinking is False  # budget-only thinking gets no adaptive request
 
 
 async def test_openrouter_list_parses_efforts() -> None:
@@ -138,3 +156,28 @@ def test_cost_counts_cache_tokens() -> None:
     assert cost(model, usage) == Decimal("2") + Decimal("1") + Decimal("0.1") + Decimal("0.5")
     assert cost(None, usage) is None
     assert cost(ModelInfo("m", "M", "openai"), usage) is None
+
+
+async def test_sidecar_names_and_none() -> None:
+    class Names:
+        async def models(self, kind: str) -> list[str] | None:
+            return ["gpt-5.5-codex", "gpt-5-codex"]
+
+    class Nothing:
+        async def models(self, kind: str) -> list[str] | None:
+            return None
+
+    live = await list_models(Provider("codex"), sidecar=Names())
+    assert [m.id for m in live] == ["gpt-5.5-codex", "gpt-5-codex"]
+    assert live[0].provider == "codex" and live[0].efforts == FALLBACK["codex"][0].efforts
+    assert live[1] == FALLBACK["codex"][0]
+    assert await list_models(Provider("codex"), sidecar=Nothing()) == FALLBACK["codex"]
+
+
+async def test_missing_live_price_uses_fallback() -> None:
+    body = {"data": [{"id": "claude-opus-5-5", "pricing": {}}], "has_more": False}
+    models = await list_models(
+        Provider("anthropic", SecretStr("k")),
+        transport=_transport(lambda r: httpx.Response(200, json=body)),
+    )
+    assert models[0].input_per_mtok == Decimal("4.00")

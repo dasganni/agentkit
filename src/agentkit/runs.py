@@ -32,10 +32,17 @@ class Run:
                 waiter.set_result(None)
         self._waiters.clear()
 
-    async def drive(self, source: EventSource) -> None:
-        async for event in source():
-            self.events.append(event)
+    async def drive(self, source: EventSource, error_event: Event = None) -> None:
+        try:
+            async for event in source():
+                self.events.append(event)
+                self._wake()
+        except Exception:
+            if error_event is None:
+                raise
+            self.events.append(error_event)
             self._wake()
+            raise
 
     def settle(self) -> None:
         self.finished = True
@@ -72,11 +79,14 @@ class RunRegistry:
         run = self._runs.get(key)
         return run is not None and not run.finished
 
-    def start(self, key: Hashable, source: EventSource) -> Run:
-        """Register and start a run; the caller has checked that none is active for `key`."""
+    def start(self, key: Hashable, source: EventSource, error_event: Event = None) -> Run:
+        """Register and start a run; the caller has checked that none is active for `key`.
+
+        When the source raises, `error_event` (if given) is appended so attached clients see it.
+        """
         run = Run()
         self._runs[key] = run
-        run.task = asyncio.get_running_loop().create_task(run.drive(source))
+        run.task = asyncio.get_running_loop().create_task(run.drive(source, error_event))
         run.task.add_done_callback(lambda task: self._ended(key, run, task))
         return run
 

@@ -59,3 +59,15 @@ async def test_cancel_stops_run() -> None:
     assert not reg.active("k")
     assert await collect(reg.attach("k")) == ["a"]
     assert not await reg.cancel("k")
+
+
+async def test_failing_source_appends_error_event() -> None:
+    reg = RunRegistry()
+
+    async def source() -> AsyncIterator[str]:
+        yield "a"
+        raise RuntimeError("boom")
+
+    run = reg.start("k", source, error_event="failed")
+    await run.settled.wait()
+    assert await collect(reg.attach("k")) == ["a", "failed"]

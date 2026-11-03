@@ -26,33 +26,6 @@ ANTHROPIC_REPLY = {
     "stop_reason": "end_turn",
     "usage": {"input_tokens": 3, "output_tokens": 2},
 }
-OPENAI_REPLY = {
-    "id": "r1",
-    "object": "response",
-    "created_at": 1,
-    "model": "m",
-    "status": "completed",
-    "parallel_tool_calls": True,
-    "tool_choice": "auto",
-    "tools": [],
-    "output": [
-        {
-            "id": "o1",
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": "ok", "annotations": []}],
-        }
-    ],
-    "usage": {
-        "input_tokens": 1,
-        "output_tokens": 1,
-        "total_tokens": 2,
-        "input_tokens_details": {"cached_tokens": 0},
-        "output_tokens_details": {"reasoning_tokens": 0},
-    },
-}
-
 OPENAI_CHAT_REPLY = {
     "id": "c1",
     "object": "chat.completion",
@@ -68,8 +41,12 @@ INFO = ModelInfo("claude-sonnet-5-5", "S", "anthropic", ("low", "medium", "high"
 PLAIN = ModelInfo("claude-haiku", "H", "anthropic", ("low", "high"), thinking=False)
 
 
-def _capture(reply: dict[str, Any], seen: list[dict[str, Any]]) -> httpx.Client:
+def _capture(
+    reply: dict[str, Any], seen: list[dict[str, Any]], urls: list[str] | None = None
+) -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
+        if urls is not None:
+            urls.append(request.url.path)
         seen.append(json.loads(request.content))
         return httpx.Response(200, json=reply)
 
@@ -98,22 +75,21 @@ def _anthropic_body(info: ModelInfo, effort: str) -> dict[str, Any]:
     return seen[0]
 
 
-def _openai_body(base_url: str, effort: str) -> dict[str, Any]:
-    # `reasoning` makes langchain-openai use the Responses API, `reasoning_effort` chat completions.
+def _openai_body(base_url: str, effort: str) -> tuple[dict[str, Any], str]:
     seen: list[dict[str, Any]] = []
-    reply = OPENAI_REPLY if "openrouter" in base_url else OPENAI_CHAT_REPLY
+    urls: list[str] = []
     model = build_chat_model(
         ProviderConfig("openai", SecretStr("k"), base_url),
         RunOptions("m", effort=effort),  # type: ignore[arg-type]
         model_info=ModelInfo("m", "M", "openai", ("low", "medium", "high")),
     )
-    root = openai.OpenAI(api_key="k", base_url=base_url, http_client=_capture(reply, seen))
-    model.root_client = root  # type: ignore[attr-defined]
-    model.client = (  # type: ignore[attr-defined]
-        root.responses if "openrouter" in base_url else root.chat.completions
+    http = _capture(OPENAI_CHAT_REPLY, seen, urls)
+    model.root_client = openai.OpenAI(  # type: ignore[attr-defined]
+        api_key="k", base_url=base_url, http_client=http
     )
+    model.client = model.root_client.chat.completions  # type: ignore[attr-defined]
     model.invoke("hi")
-    return seen[0]
+    return seen[0], urls[0]
 
 
 def test_anthropic_effort_in_request() -> None:
@@ -143,13 +119,15 @@ def test_cache_control_set() -> None:
 
 
 def test_openrouter_reasoning_effort() -> None:
-    body = _openai_body("https://openrouter.ai/api/v1", "medium")
+    body, path = _openai_body("https://openrouter.ai/api/v1", "medium")
+    assert path.endswith("/chat/completions")
     assert body["reasoning"] == {"effort": "medium"}
     assert "reasoning_effort" not in body
 
 
 def test_openai_reasoning_effort() -> None:
-    body = _openai_body("https://api.openai.com/v1", "medium")
+    body, path = _openai_body("https://api.openai.com/v1", "medium")
+    assert path.endswith("/chat/completions")
     assert body["reasoning_effort"] == "medium"
     assert "reasoning" not in body
 
