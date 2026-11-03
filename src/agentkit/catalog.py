@@ -36,7 +36,7 @@ class UsageLike(Protocol):
 
 
 class SidecarLike(Protocol):
-    async def models(self, kind: str) -> list[dict[str, Any]]: ...
+    async def models(self, kind: str) -> list[str] | list[dict[str, Any]] | None: ...
 
 
 @dataclass(frozen=True)
@@ -84,16 +84,20 @@ def _prices_by_id(kind: str) -> dict[str, ModelInfo]:
     return {m.id: m for m in FALLBACK.get(kind, [])}
 
 
+def _first(live: Decimal | None, base: Decimal | None) -> Decimal | None:
+    return base if live is None else live
+
+
 def _with_prices(info: ModelInfo, known: dict[str, ModelInfo]) -> ModelInfo:
     base = known.get(info.id)
     if base is None:
         return info
     return replace(
         info,
-        input_per_mtok=info.input_per_mtok or base.input_per_mtok,
-        output_per_mtok=info.output_per_mtok or base.output_per_mtok,
-        cache_read_per_mtok=info.cache_read_per_mtok or base.cache_read_per_mtok,
-        cache_write_per_mtok=info.cache_write_per_mtok or base.cache_write_per_mtok,
+        input_per_mtok=_first(info.input_per_mtok, base.input_per_mtok),
+        output_per_mtok=_first(info.output_per_mtok, base.output_per_mtok),
+        cache_read_per_mtok=_first(info.cache_read_per_mtok, base.cache_read_per_mtok),
+        cache_write_per_mtok=_first(info.cache_write_per_mtok, base.cache_write_per_mtok),
         context=info.context or base.context,
     )
 
@@ -114,12 +118,14 @@ def _supported_levels(effort: Any) -> tuple[str, ...]:
 def _anthropic_model(item: dict[str, Any]) -> ModelInfo:
     caps = item.get("capabilities") or {}
     thinking = caps.get("thinking") or {}
+    types = thinking.get("types") if isinstance(thinking, dict) else None
+    adaptive = (types or {}).get("adaptive") or {}
     return ModelInfo(
         id=item["id"],
         label=item.get("display_name") or item["id"],
         provider="anthropic",
         efforts=_supported_levels(caps.get("effort")),
-        thinking=bool(thinking.get("supported")) if isinstance(thinking, dict) else False,
+        thinking=adaptive.get("supported") is True,
         context=item.get("max_input_tokens"),
     )
 
@@ -175,17 +181,25 @@ async def _openai_list(client: httpx.AsyncClient, provider: ProviderLike) -> lis
     return [_openrouter_model(item) for item in resp.json()["data"]]
 
 
-async def _sidecar_list(kind: str, sidecar: SidecarLike) -> list[ModelInfo]:
-    return [
-        ModelInfo(
+def _sidecar_model(item: str | dict[str, Any], kind: str, fallback: list[ModelInfo]) -> ModelInfo:
+    """A sidecar entry: a bare name (known fallback entry or default efforts) or a full dict."""
+    if isinstance(item, dict):
+        return ModelInfo(
             id=item["id"],
             label=item.get("label") or item["id"],
             provider=kind,
             efforts=tuple(item.get("efforts") or ()),
             thinking=bool(item.get("thinking")),
         )
-        for item in await sidecar.models(kind)
-    ]
+    known = next((m for m in fallback if m.id == item), None)
+    efforts = fallback[0].efforts if fallback else ()
+    return known or ModelInfo(item, item, kind, efforts, thinking=True)
+
+
+async def _sidecar_list(kind: str, sidecar: SidecarLike) -> list[ModelInfo]:
+    fallback = FALLBACK.get(kind, [])
+    items = await sidecar.models(kind)
+    return [_sidecar_model(item, kind, fallback) for item in items or []]
 
 
 async def list_models(

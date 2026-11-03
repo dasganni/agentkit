@@ -79,7 +79,7 @@ def _openai(cfg: ProviderConfig, opts: RunOptions, info: ModelInfo | None) -> Ch
     extra: dict[str, Any] = {}
     effort = _effort(opts, info)
     if effort and _is_openrouter(cfg.base_url):
-        extra["reasoning"] = {"effort": effort}
+        extra["extra_body"] = {"reasoning": {"effort": effort}}
     elif effort:
         extra["reasoning_effort"] = effort
     if opts.max_tokens:
