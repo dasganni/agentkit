@@ -1,12 +1,14 @@
 from pathlib import Path
 
+import pytest
+
 from agentkit.skillcheck import check_skills, scan_tokens
 
 SCHEMAS = [
     {
         "name": "accounts",
-        "ops": ["list", {"name": "add", "params": {"properties": {"account_id": {}}}}],
-        "params": {"properties": {"limit": {}}},
+        "ops": ["list", "add"],
+        "params": {"properties": {"limit": {}, "account_id": {}}},
     },
     {"name": "budget", "params": {"properties": {"month_start": {}}}},
 ]
@@ -39,6 +41,26 @@ def test_underscore_names_checked(tmp_path: Path) -> None:
     assert "--month-start" in problems[0]
     ok = skill(tmp_path, "`demo accounts add --account_id 3`")
     assert check_skills(ok, SCHEMAS, "demo") == []
+
+
+@pytest.mark.parametrize(
+    "command, fragment",
+    [
+        ("demo accounts --limit 3", "missing op"),
+        ("demo accounts list --url http://x", "unknown flag '--url'"),
+        ("demo accounts list --token-stdin", "unknown flag '--token-stdin'"),
+        ("demo accounts list | jq --raw-output .", None),
+        ("$ demo accounts list --nope", "unknown flag '--nope'"),
+        ("$ demo accounts list --limit 2 --json", None),
+        ("demo accounts --help", None),
+    ],
+)
+def test_matches_go_cli_parser(tmp_path: Path, command: str, fragment: str | None) -> None:
+    problems = check_skills(skill(tmp_path, f"```\n{command}\n```\n"), SCHEMAS, "demo")
+    if fragment is None:
+        assert problems == []
+    else:
+        assert len(problems) == 1 and fragment in problems[0]
 
 
 def test_token_scan(tmp_path: Path) -> None:

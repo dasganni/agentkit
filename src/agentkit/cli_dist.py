@@ -11,7 +11,7 @@ TARGETS = frozenset(
 
 
 def cli_router(dist_dir: Path) -> APIRouter:
-    """Serve `version`, `<os>-<arch>` (gzip) and `<os>-<arch>.sha256` from `dist_dir`.
+    """Serve `version`, `<os>-<arch>` (gzip, no extension) and `<os>-<arch>.sha256` from `dist_dir`.
 
     Every route answers 404 while the directory or the requested file is missing.
     """
@@ -36,6 +36,6 @@ def cli_router(dist_dir: Path) -> APIRouter:
             raise HTTPException(404, "not found")
         if is_sha:
             return PlainTextResponse(existing(f"{target}.sha256").read_text().strip())
-        return FileResponse(existing(f"{target}.gz"), media_type="application/gzip")
+        return FileResponse(existing(target), media_type="application/gzip")
 
     return router

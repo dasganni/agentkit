@@ -1,6 +1,8 @@
 from ipaddress import ip_network
 from types import SimpleNamespace
 
+import pytest
+
 from agentkit.forward_auth import (
     EXEMPT_PREFIXES,
     ForwardAuthConfig,
@@ -57,3 +59,29 @@ def test_exempt_prefixes() -> None:
     for path in ("/api/v1/agent/tools", "/cli/version", "/oauth/token", "/.well-known/x", "/mcp"):
         assert is_exempt(path)
     assert not is_exempt("/api/v1/other")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/agents",
+        "/api/v1/agent-tokens",
+        "/mcpanything",
+        "/oauth/tokens",
+        "/oauth/registered-clients",
+        "/api/v1/agent/../../admin",
+        "/api/v1/agent/./x",
+        "/api/v1/agent//x",
+        "/cli/..",
+        "api/v1/agent",
+    ],
+)
+def test_near_miss_and_dotted_paths_not_exempt(path: str) -> None:
+    assert not is_exempt(path)
+
+
+@pytest.mark.parametrize(
+    "path", ["/api/v1/agent", "/cli/", "/mcp/", "/mcp/x", "/oauth/register", "/.well-known/a/b"]
+)
+def test_segment_matches_exempt(path: str) -> None:
+    assert is_exempt(path)
