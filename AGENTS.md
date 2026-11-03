@@ -10,6 +10,9 @@ and the Go CLI. Python package `agentkit` (src layout, Python 3.13, uv) and Go m
 - `cli/` Go module `github.com/dasganni/agentkit/cli` (cmd, internal/config|oauth|client|tools|cmd|version)
 - `scripts/` gate and CLI distribution, `integrations/` plugin templates
 
+Module interfaces and how an app adopts the kit (routers, Dockerfile Go stage, shim, sidecar
+variables, versioning) are in README.md; change it with the code.
+
 ## Gate
 
 `./scripts/gate.sh`: ruff check, ruff format --check, mypy src, pytest; then `go vet` and
