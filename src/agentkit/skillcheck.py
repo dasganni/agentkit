@@ -7,7 +7,9 @@ from typing import Any
 
 SKILL_FILES = ("SKILL.md", "reference.md")
 BUILTIN_COMMANDS = frozenset({"login", "logout", "status", "token", "version", "tools", "help"})
-GLOBAL_FLAGS = frozenset({"json", "help", "url", "token-stdin"})
+# Flags every tool command takes: Run strips --json, the flag set answers --help.
+TOOL_FLAGS = frozenset({"json", "help"})
+_SHELL_BREAKS = frozenset({"|", "||", "&&", ";", ">", ">>", "<", "&"})
 _FLAG = re.compile(r"--([A-Za-z0-9_-]+)")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _TOKEN = re.compile(r"\b(?:tt|rw|fit|tto)_[A-Za-z0-9_-]{20,}|\bBearer\s+[A-Za-z0-9._~+/=-]{20,}")
@@ -19,15 +21,12 @@ def _props(schema: Any) -> set[str]:
     return set()
 
 
-def _ops(tool: dict[str, Any]) -> dict[str, set[str]]:
-    """Operation name -> flags that operation accepts (its own params)."""
-    ops: dict[str, set[str]] = {}
-    for op in tool.get("ops") or []:
-        if isinstance(op, str):
-            ops[op] = set()
-        else:
-            ops[op["name"]] = _props(op.get("params"))
-    return ops
+def _until_shell_break(words: list[str]) -> list[str]:
+    """The words of the first command; a pipe, redirect or `&&` ends it."""
+    for index, word in enumerate(words):
+        if word in _SHELL_BREAKS or word.startswith("|"):
+            return words[:index]
+    return words
 
 
 def _commands(text: str, app: str) -> Iterator[tuple[int, list[str]]]:
@@ -39,7 +38,7 @@ def _commands(text: str, app: str) -> Iterator[tuple[int, list[str]]]:
             continue
         candidates = [line.strip()] if fenced else _SPAN.findall(line)
         for candidate in candidates:
-            words = candidate.split()
+            words = _until_shell_break(candidate.removeprefix("$ ").split())
             if words and words[0] == app:
                 yield number, words
 
@@ -52,20 +51,30 @@ def _check_command(words: list[str], tools: dict[str, dict[str, Any]]) -> Iterat
     if tool is None:
         yield f"unknown tool '{rest[0]}'"
         return
-    ops = _ops(tool)
-    allowed = _props(tool.get("params")) | GLOBAL_FLAGS
+    ops: list[str] = tool.get("ops") or []
+    allowed = _props(tool.get("params")) | TOOL_FLAGS
     after = rest[1:]
-    if after and not after[0].startswith(("-", "<", "[")) and ops:
-        if after[0] not in ops:
-            yield f"unknown operation '{after[0]}' for {app} {rest[0]}"
+    problem = _op_problem(app, rest[0], ops, after) if ops and after else None
+    if problem:
+        yield problem
+        if problem.startswith("unknown operation"):
             return
-        allowed |= ops[after[0]]
-    elif ops:
-        allowed |= set().union(*ops.values())
     for word in after:
         match = _FLAG.match(word)
         if match and match.group(1) not in allowed:
             yield f"unknown flag '--{match.group(1)}' for {app} {rest[0]}"
+
+
+def _op_problem(app: str, tool: str, ops: list[str], after: list[str]) -> str | None:
+    """What the CLI's op parsing rejects: no op before the flags, or an op the tool lacks."""
+    first = after[0]
+    if first.startswith("-"):
+        if {"--help", "-h"} & set(after):
+            return None
+        return f"missing op for {app} {tool}, expected one of: {', '.join(ops)}"
+    if first.startswith(("<", "[")) or first in ops:
+        return None
+    return f"unknown operation '{first}' for {app} {tool}"
 
 
 def check_skills(skill_dirs: Iterable[Path], schemas: list[dict[str, Any]], app: str) -> list[str]:

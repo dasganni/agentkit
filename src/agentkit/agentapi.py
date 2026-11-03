@@ -6,8 +6,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
 
 PROTOCOL = 1
 PROTOCOL_MIN = 1
@@ -70,13 +71,52 @@ def _protocol_error(request: Request) -> JSONResponse | None:
         wanted = -1
     if PROTOCOL_MIN <= wanted <= PROTOCOL:
         return None
+    remedy = "Update the server." if wanted > PROTOCOL else "Update the CLI."
     return _reply(
         426,
         {
             "error": f"Agent protocol {raw} is not supported (server speaks "
-            f"{PROTOCOL_MIN}-{PROTOCOL}). Update the CLI."
+            f"{PROTOCOL_MIN}-{PROTOCOL}). {remedy}"
         },
     )
+
+
+def _http_error(
+    exc: HTTPException, request: Request, resource_metadata: Callable[[Request], str] | None
+) -> JSONResponse:
+    headers = {k: str(v) for k, v in (exc.headers or {}).items()}
+    if exc.status_code == 401:
+        challenge = "Bearer"
+        if resource_metadata is not None:
+            challenge += f' resource_metadata="{resource_metadata(request)}"'
+        headers["WWW-Authenticate"] = challenge
+    return _reply(exc.status_code, {"error": str(exc.detail)}, headers)
+
+
+def _tool_error(exc: ToolError) -> JSONResponse:
+    body: dict[str, Any] = {"error": exc.message}
+    if exc.field:
+        body["field"] = exc.field
+    return _reply(exc.status, body)
+
+
+async def _guarded(
+    request: Request,
+    authenticate: Callable[[Request], Awaitable[Caller]],
+    resource_metadata: Callable[[Request], str] | None,
+    action: Callable[[Caller], Awaitable[Response]],
+) -> Response:
+    if (refused := _protocol_error(request)) is not None:
+        return refused
+    try:
+        return await action(await authenticate(request))
+    except HTTPException as exc:
+        return _http_error(exc, request, resource_metadata)
+    except ToolError as exc:
+        return _tool_error(exc)
+    except Exception:
+        log.exception("agent API call failed")
+        return _reply(500, {"error": "Internal error"})
 
 
 def agent_router(
@@ -90,30 +130,10 @@ def agent_router(
     """Routes under `prefix`; `resource_metadata` supplies the URL for the 401 challenge."""
     router = APIRouter(prefix=prefix)
 
-    async def guarded(
+    def guarded(
         request: Request, action: Callable[[Caller], Awaitable[Response]]
-    ) -> Response:
-        if (refused := _protocol_error(request)) is not None:
-            return refused
-        try:
-            caller = await authenticate(request)
-            return await action(caller)
-        except HTTPException as exc:
-            headers = {k: str(v) for k, v in (exc.headers or {}).items()}
-            if exc.status_code == 401:
-                challenge = "Bearer"
-                if resource_metadata is not None:
-                    challenge += f' resource_metadata="{resource_metadata(request)}"'
-                headers["WWW-Authenticate"] = challenge
-            return _reply(exc.status_code, {"error": str(exc.detail)}, headers)
-        except ToolError as exc:
-            body: dict[str, Any] = {"error": exc.message}
-            if exc.field:
-                body["field"] = exc.field
-            return _reply(exc.status, body)
-        except Exception:
-            log.exception("agent API call failed")
-            return _reply(500, {"error": "Internal error"})
+    ) -> Awaitable[Response]:
+        return _guarded(request, authenticate, resource_metadata, action)
 
     @router.get("/tools")
     async def list_tools(request: Request) -> Response:

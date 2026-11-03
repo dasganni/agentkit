@@ -54,7 +54,19 @@ class Identity:
 
 
 def is_exempt(path: str) -> bool:
-    return path.startswith(EXEMPT_PREFIXES)
+    """True when `path` is an exempt prefix or below it, matched on whole segments.
+
+    Paths with `.`, `..` or empty segments (a single trailing slash aside) are never exempt.
+    """
+    segments = path.split("/")
+    if segments[0] != "" or any(s in ("", ".", "..") for s in segments[1:-1]):
+        return False
+    if segments[-1] in (".", ".."):
+        return False
+    return any(
+        path == (base := prefix.rstrip("/")) or path.startswith(base + "/")
+        for prefix in EXEMPT_PREFIXES
+    )
 
 
 def _first(request: _Request, names: tuple[str, ...]) -> str | None:
@@ -76,7 +88,11 @@ def _trusted(request: _Request, cfg: ForwardAuthConfig) -> bool:
 
 
 def forwarded_identity(request: _Request, cfg: ForwardAuthConfig) -> Identity | None:
-    """Identity from the proxy headers; None unless the direct peer is a trusted proxy."""
+    """Identity from the proxy headers; None unless the direct peer is a trusted proxy.
+
+    `request.client` must be the socket peer: run uvicorn with `--no-proxy-headers` (or
+    `forwarded_allow_ips` limited to the proxy), or a caller can forge it via X-Forwarded-For.
+    """
     if not cfg.enabled or not _trusted(request, cfg):
         return None
     email = _first(request, cfg.headers.email)
