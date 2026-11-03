@@ -3,6 +3,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,31 +115,69 @@ func (s *Store) Clear() error {
 	return nil
 }
 
-// Lock takes the renewal lock file next to the config and returns its release.
-// A lock older than staleAfter is taken over.
+// LockStale is how long a lock may stand before it counts as left by a crashed process. Callers bound
+// their work under the lock well below it and wait longer than it, so a live holder is never taken over.
+var LockStale = time.Minute
+
+// Lock takes the renewal lock file next to the config and returns its release. The file holds a random
+// nonce; release removes it only while it still holds that nonce, so a holder whose lock was taken over
+// never deletes the new owner's. A lock older than LockStale is taken over.
+//
+// limit: two waiters that both find a stale lock can both take it over, only after a crash.
 func (s *Store) Lock(wait time.Duration) (func(), error) {
-	const staleAfter = 30 * time.Second
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
 		return nil, err
 	}
 	path := s.Path + ".lock"
+	nonce, err := newNonce()
+	if err != nil {
+		return nil, err
+	}
 	deadline := time.Now().Add(wait)
 	for {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		err := createLock(path, nonce)
 		if err == nil {
-			f.Close()
-			return func() { os.Remove(path) }, nil
+			return func() { releaseLock(path, nonce) }, nil
 		}
 		if !errors.Is(err, fs.ErrExist) {
 			return nil, err
 		}
-		if st, serr := os.Stat(path); serr == nil && time.Since(st.ModTime()) > staleAfter {
+		if st, serr := os.Stat(path); serr == nil && time.Since(st.ModTime()) > LockStale {
 			os.Remove(path)
 			continue
 		}
 		if time.Now().After(deadline) {
-			return nil, errors.New("timed out waiting for the renewal lock")
+			return nil, fmt.Errorf("timed out waiting for the renewal lock %s; remove it if no %s command is running", path, s.App)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func newNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func createLock(path, nonce string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.WriteString(nonce)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		os.Remove(path)
+	}
+	return werr
+}
+
+func releaseLock(path, nonce string) {
+	if b, err := os.ReadFile(path); err == nil && string(b) == nonce {
+		os.Remove(path)
 	}
 }
