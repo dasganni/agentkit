@@ -20,8 +20,12 @@ import (
 
 const (
 	renewMargin = time.Minute
-	lockWait    = 30 * time.Second
+	// lockHold bounds what a renewal does under the lock, below config.LockStale, so a live holder is never
+	// taken over; lockWait exceeds config.LockStale, so a waiter outlasts a crashed holder's lock.
+	lockWait = time.Minute + 15*time.Second
 )
+
+var lockHold = 20 * time.Second
 
 // AuthError means the login is missing or no longer accepted; the CLI exits with 3.
 type AuthError struct{ Msg string }
@@ -133,8 +137,14 @@ func (c *Client) send(ctx context.Context, baseURL, method, path, token string, 
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusUpgradeRequired {
-		return nil, &ProtocolError{fmt.Sprintf(
-			"this CLI speaks agent protocol %d, which the server no longer accepts; update the CLI", version.Protocol)}
+		msg := fmt.Sprintf("this CLI speaks agent protocol %d, which the server does not accept", version.Protocol)
+		var e struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(data, &e) == nil && e.Error != "" {
+			msg += ": " + e.Error
+		}
+		return nil, &ProtocolError{msg + "; update the CLI or the server, whichever is older"}
 	}
 	return &Response{Status: resp.StatusCode, Body: data}, nil
 }
@@ -157,7 +167,9 @@ func (c *Client) renew(ctx context.Context, staleToken string) (string, error) {
 	if cfg.RefreshToken == "" {
 		return "", &AuthError{"not logged in, run login first"}
 	}
-	t, err := oauth.Refresh(ctx, c.httpClient(), cfg.BaseURL(), cfg.ClientID, cfg.RefreshToken)
+	rctx, cancel := context.WithTimeout(ctx, lockHold)
+	defer cancel()
+	t, err := oauth.Refresh(rctx, c.httpClient(), cfg.BaseURL(), cfg.ClientID, cfg.RefreshToken)
 	if errors.Is(err, oauth.ErrLoggedOut) {
 		cfg.AccessToken, cfg.RefreshToken, cfg.ExpiresAt = "", "", time.Time{}
 		if serr := c.Store.Save(cfg); serr != nil {

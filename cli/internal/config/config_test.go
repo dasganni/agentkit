@@ -78,3 +78,30 @@ func TestLockExcludesAndReleases(t *testing.T) {
 	}
 	release2()
 }
+
+func TestLockReleaseKeepsNewOwnersLock(t *testing.T) {
+	s := newStore(t)
+	old := LockStale
+	LockStale = 30 * time.Millisecond
+	t.Cleanup(func() { LockStale = old })
+	releaseA, err := s.Lock(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	releaseB, err := s.Lock(time.Second) // takes over A's stale lock
+	if err != nil {
+		t.Fatal(err)
+	}
+	LockStale = time.Minute
+	releaseA() // must not remove B's lock
+	if _, err := s.Lock(60 * time.Millisecond); err == nil {
+		t.Fatal("A's release removed B's lock")
+	}
+	releaseB()
+	release, err := s.Lock(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+}

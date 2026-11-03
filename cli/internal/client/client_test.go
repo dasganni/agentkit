@@ -178,3 +178,30 @@ func TestUpgradeRequired(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestHungRefreshIsBoundedByLockHold(t *testing.T) {
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/oauth-authorization-server" {
+			_, _ = w.Write([]byte(`{"authorization_endpoint":"x","token_endpoint":"http://` + r.Host + `/oauth/token"}`))
+			return
+		}
+		<-release
+	}))
+	t.Cleanup(hang.Close)
+	t.Cleanup(func() { close(release) })
+	s := store(t, &fake{srv: hang}, config.Config{AccessToken: "old", RefreshToken: "rt", ExpiresAt: time.Now().Add(-time.Hour)})
+	old := lockHold
+	lockHold = 150 * time.Millisecond
+	t.Cleanup(func() { lockHold = old })
+	start := time.Now()
+	if _, err := get(s, "/api/v1/agent/ping"); err == nil {
+		t.Fatal("expected an error")
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("refresh held the lock for %v", time.Since(start))
+	}
+	if _, err := s.Lock(time.Second); err != nil {
+		t.Fatalf("lock still held: %v", err)
+	}
+}

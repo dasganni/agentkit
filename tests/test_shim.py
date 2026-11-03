@@ -85,10 +85,10 @@ def shim(tmp_path: Path) -> Path:
 
 
 def run(
-    shim: Path, tmp_path: Path, url: str | None, *args: str
+    shim: Path, tmp_path: Path, url: str | None, *args: str, path: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     env = {
-        "PATH": os.environ["PATH"],
+        "PATH": path or os.environ["PATH"],
         "HOME": str(tmp_path / "home"),
         "XDG_CACHE_HOME": str(tmp_path / "cache"),
         "XDG_CONFIG_HOME": str(tmp_path / "config"),
@@ -168,3 +168,55 @@ def test_shim_no_server_no_cache_exit3(shim: Path, tmp_path: Path) -> None:
     result = run(shim, tmp_path, "http://127.0.0.1:9")
     assert result.returncode == 3
     assert run(shim, tmp_path, None).returncode == 3
+
+
+def test_shim_refuses_plain_http_off_loopback(shim: Path, tmp_path: Path) -> None:
+    for url in ("http://example.com", "http://127.0.0.1.evil.example", "http://user@127.0.0.1"):
+        result = run(shim, tmp_path, url, "hello")
+        assert result.returncode == 1, url
+        assert "https" in result.stderr or "credentials" in result.stderr
+
+
+def test_shim_first_login_takes_url_from_arguments(
+    shim: Path, server: Server, tmp_path: Path
+) -> None:
+    result = run(shim, tmp_path, None, "login", "--url", server.url)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"{APP}-1.0.0 login --url {server.url}"
+    force_recheck(tmp_path)
+    result = run(shim, tmp_path, None, "login", f"--url={server.url}")
+    assert result.returncode == 0, result.stderr
+
+
+def test_shim_failed_check_uses_short_timeout_and_backs_off(
+    shim: Path, server: Server, tmp_path: Path
+) -> None:
+    assert run(shim, tmp_path, server.url).returncode == 0
+    force_recheck(tmp_path)
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    log = tmp_path / "curl.log"
+    curl = stubs / "curl"
+    curl.write_text(f'#!/bin/sh\necho "$@" >>{log}\nexit 28\n')
+    curl.chmod(0o755)
+    path = f"{stubs}:{os.environ['PATH']}"
+    for _ in range(2):
+        result = run(shim, tmp_path, server.url, "x", path=path)
+        assert result.stdout.strip() == f"{APP}-1.0.0 x", result.stderr
+    calls = log.read_text().splitlines()
+    assert len(calls) == 1
+    assert "--connect-timeout 5" in calls[0]
+
+
+def test_shim_download_failure_falls_back_to_cached_version(
+    shim: Path, server: Server, tmp_path: Path
+) -> None:
+    assert run(shim, tmp_path, server.url).returncode == 0
+    force_recheck(tmp_path)
+    server.version = "1.1.0"
+    server.sha_override = None
+    original = server.body
+    server.body = lambda p: None if p == f"/cli/{OS}-{ARCH}" else original(p)  # type: ignore[method-assign]
+    result = run(shim, tmp_path, server.url, "y")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"{APP}-1.0.0 y"
