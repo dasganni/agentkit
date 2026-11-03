@@ -1,8 +1,9 @@
 """HTTP server of the sidecar on a unix socket, guarded by the shared secret.
 
-Endpoints: POST /run (NDJSON events), GET /models?backend=, GET /healthz (also /health). Standard
-library only. The socket lives on a volume shared with the app and nothing else; every request must
-carry the secret in `X-Agent-Secret`.
+Endpoints: POST /run (NDJSON events), POST /login/start, POST /login/code, GET /login/status,
+POST /logout, GET /models?backend=, GET /healthz (also /health). Standard library only.
+The socket lives on a volume shared with the app and nothing else; every request must carry the
+secret in `X-Agent-Secret`.
 
 Environment:
   AGENT_SOCKET            socket path (default /run/agent/agent.sock); the secret file
@@ -45,8 +46,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from agentkit.sidecar import runner
-from agentkit.sidecar.runner import BadRequest, Config, Runtime
+from agentkit.sidecar import login, runner
+from agentkit.sidecar.runner import BadRequest, Busy, Config, Runtime
 
 log = logging.getLogger("agent-runner")
 MAX_BODY = 1_000_000
@@ -58,6 +59,7 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     def __init__(self, path: str, cfg: Config) -> None:
         self.cfg = cfg
         self.runtime = Runtime(cfg)
+        self.logins = login.Logins(cfg)
         self.threads = threading.BoundedSemaphore(cfg.max_threads)
         if os.path.exists(path):
             os.unlink(path)
@@ -150,6 +152,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path in ("/healthz", "/health"):
                 self._json(200, self._health())
+            elif url.path == "/login/status":
+                query = {k: v[0] for k, v in parse_qs(url.query).items()}
+                self._json(
+                    200,
+                    self.server.logins.aux.status(
+                        runner.check_user(query.get("user")),
+                        runner.check_backend(query.get("backend") or "claude"),
+                    ),
+                )
             elif url.path == "/models":
                 query = {k: v[0] for k, v in parse_qs(url.query).items()}
                 backend = runner.check_backend(query.get("backend") or "claude")
@@ -158,20 +169,41 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "not found"})
         except BadRequest as exc:
             self._json(400, {"error": str(exc)})
+        except Busy:
+            self._json(503, {"error": "busy"})
 
     def do_POST(self) -> None:
         if not self._authorised():
             return
         try:
             body = self._body()
-            if urlsplit(self.path).path != "/run":
+            path = urlsplit(self.path).path
+            if path == "/run":
+                req = runner.RunRequest.parse(body)
+                self.server.runtime.validate(req)
+                self._run(req)
+            elif path in ("/login/start", "/login/code", "/logout"):
+                self._login(path, body)
+            else:
                 self._json(404, {"error": "not found"})
-                return
-            req = runner.RunRequest.parse(body)
-            self.server.runtime.validate(req)
-            self._run(req)
         except BadRequest as exc:
             self._json(400, {"error": str(exc)})
+        except Busy:
+            self._json(503, {"error": "busy"})
+
+    def _login(self, path: str, body: dict[str, Any]) -> None:
+        logins = self.server.logins
+        user, backend = body.get("user"), body.get("backend")
+        if path == "/login/start":
+            self._json(200, logins.start(user, backend))
+        elif path == "/login/code":
+            code = body.get("code")
+            if not isinstance(code, str):
+                raise BadRequest("invalid code")
+            self._json(200, {"connected": logins.code(user, backend, code) == 0})
+        else:
+            login.logout(self.server.cfg, logins, user, backend)
+            self._json(200, {"ok": True})
 
     def _disconnected(self) -> bool:
         conn: socket.socket = self.connection

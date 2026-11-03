@@ -246,7 +246,7 @@ def test_invalid_requests_are_400(client: httpx.Client) -> None:
     assert client.post("/run", json=body(effort="extreme")).status_code == 400
     assert client.post("/run", json={"system": "x"}).status_code == 400
     assert client.post("/run", content=b"[1]").status_code == 400
-    assert client.post("/login/start", json={}).status_code == 404
+    assert client.post("/nowhere", json={}).status_code == 404
 
 
 def test_bad_content_length_400(client: httpx.Client, cfg: runner.Config) -> None:
