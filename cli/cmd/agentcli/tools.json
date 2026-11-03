@@ -1,0 +1,18 @@
+[
+  {
+    "name": "notes",
+    "description": "Read and write notes (example schema).",
+    "ops": ["list", "add"],
+    "write": false,
+    "params": {
+      "type": "object",
+      "properties": {
+        "limit": {"type": "integer", "description": "Maximum number of notes"},
+        "text": {"type": "string", "description": "Note text (add)"},
+        "kind": {"type": "string", "enum": ["todo", "idea"], "description": "Note kind"},
+        "pinned": {"type": "boolean", "description": "Pin the note"},
+        "meta": {"type": "object", "description": "Extra data as JSON or @file"}
+      }
+    }
+  }
+]
