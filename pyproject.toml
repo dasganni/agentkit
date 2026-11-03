@@ -1,0 +1,40 @@
+[project]
+name = "agentkit"
+version = "0.1.0"
+description = "Shared agent runtime, sidecar, agent API and CLI for the apps"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "httpx",
+    "pydantic",
+    "fastapi",
+    "langchain-core",
+    "langchain-anthropic==1.7.6",
+    "langchain-openai==1.7.2",
+]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentkit"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
