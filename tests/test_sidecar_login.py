@@ -1,5 +1,7 @@
 """Sign-in, code entry, status and logout against fake Claude Code and Codex executables."""
 
+import os
+import subprocess
 import sys
 import threading
 from collections.abc import Iterator
@@ -8,7 +10,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agentkit.sidecar import runner, server
+from agentkit.sidecar import __main__ as entry
+from agentkit.sidecar import login, runner, server
 
 SECRET = "sidecar-secret"
 
@@ -67,6 +70,7 @@ def cfg(tmp_path: Path) -> runner.Config:
         path=f"{bins}:/usr/bin:/bin",
         ro_paths=(*runner.SYSTEM_PATHS, str(bins), sys.prefix, sys.base_prefix),
         require_sandbox=False,
+        self_check=False,
         userns="off",
         status_ttl=0.0,
     )
@@ -133,3 +137,59 @@ def test_logout_removes_credentials(client: httpx.Client, cfg: runner.Config) ->
     assert client.post("/logout", json=body).status_code == 200
     assert not directory.exists()
     assert status(client, "claude") == {"connected": False}
+
+
+def test_the_pty_is_closed_only_by_its_pump(cfg: runner.Config) -> None:
+    proc = subprocess.Popen(["true"], start_new_session=True)
+    master, slave = os.openpty()
+    os.close(slave)
+    live = login.Login(proc, master)
+    live.close()
+    os.fstat(master)  # stopping the CLI leaves the descriptor to the pump
+    live.free_fd()
+    with pytest.raises(OSError):
+        os.fstat(master)
+    reused, other = os.openpty()  # may well get the old number
+    try:
+        assert live.write(b"late code\r") is False  # never reaches another sign-in's terminal
+        os.set_blocking(reused, False)
+        with pytest.raises(BlockingIOError):
+            os.read(reused, 10)
+    finally:
+        os.close(reused)
+        os.close(other)
+    live.free_fd()  # idempotent
+
+
+def test_a_code_after_the_sign_in_ended_is_refused(client: httpx.Client) -> None:
+    body = {"user": "u1", "backend": "claude"}
+    client.post("/login/start", json=body).raise_for_status()
+    client.post("/login/code", json={**body, "code": "good-code"}).raise_for_status()
+    for _ in range(50):  # the pump has seen the end and dropped the sign-in
+        if client.post("/login/code", json={**body, "code": "late"}).status_code == 400:
+            break
+        threading.Event().wait(0.1)
+    assert client.post("/login/code", json={**body, "code": "late"}).status_code == 400
+
+
+def test_terminal_login_runs_the_cli_in_the_users_directory(
+    cfg: runner.Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+    for name, value in {
+        "AGENT_HOME": str(cfg.root),
+        "AGENT_CLAUDE_BIN": cfg.bins["claude"],
+        "AGENT_CODEX_BIN": cfg.bins["codex"],
+        "AGENT_REQUIRE_SANDBOX": "0",
+        "AGENT_USERNS": "off",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(runner, "sandbox_abi", lambda: 0)
+    monkeypatch.setattr(os, "execvpe", lambda f, a, e: seen.update(args=a, env=e))
+    monkeypatch.setattr(os, "chdir", lambda p: seen.update(cwd=str(p)))
+    assert entry.main(["login", "u1", "codex"]) == 1
+    assert seen["args"] == [cfg.bins["codex"], "login", "--device-auth"]
+    assert seen["cwd"] == str(runner.backend_dir(cfg, "u1", "codex") / "home")
+    entry.main(["login", "claude"])
+    assert seen["args"] == [cfg.bins["claude"], "auth", "login", "--claudeai"]
+    assert seen["cwd"] == str(runner.backend_dir(cfg, "", "claude") / "home")

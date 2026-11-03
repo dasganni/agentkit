@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import anyio
 import httpx
 
 CALL_TIMEOUT = 40.0
@@ -92,7 +93,9 @@ class SidecarClient:
         except (httpx.TransportError, OSError) as error:
             raise SidecarUnavailable("the agent sidecar is not reachable") from error
         finally:
-            await client.aclose()
+            # Shielded: a cancelled caller must still hang up, or the sidecar's CLI keeps running.
+            with anyio.CancelScope(shield=True):
+                await client.aclose()
 
     async def _call(
         self,
@@ -132,8 +135,12 @@ class SidecarClient:
         return {"connected": bool(data.get("connected"))}
 
     async def status(self, kind: str, *, user: str = "") -> dict[str, Any]:
-        """{connected, account_hint?}; never a token."""
+        """{connected, account_hint?}; never a token. Busy or unavailable raise."""
         data = await self._call("GET", "/login/status", {"user": user, "backend": kind})
+        if data.get("error") == "busy":
+            raise SidecarBusy("the agent sidecar is busy")
+        if data.get("error"):
+            raise SidecarUnavailable("the CLI status could not run")
         out: dict[str, Any] = {"connected": bool(data.get("connected"))}
         if isinstance(data.get("account_hint"), str):
             out["account_hint"] = data["account_hint"]
@@ -142,6 +149,16 @@ class SidecarClient:
     async def logout(self, kind: str, *, user: str = "") -> None:
         """Signs the user out of the CLI and removes their files for it."""
         await self._call("POST", "/logout", {"user": user, "backend": kind})
+
+    async def health(self) -> dict[str, Any]:
+        """The sidecar's own report (backends, sandbox, self-check); never a secret."""
+        return await self._call("GET", "/healthz", {}, 10.0)
+
+    async def prune(self, keep: list[str]) -> int:
+        """Removes the directories of every user key not in `keep`; how many went."""
+        data = await self._call("POST", "/prune", {"keep": keep}, 120.0)
+        removed = data.get("removed")
+        return removed if isinstance(removed, int) else 0
 
     async def models(self, kind: str) -> list[str] | None:
         """The model names a run accepts; None when the sidecar does not restrict them."""

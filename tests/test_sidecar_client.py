@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from agentkit.sidecar_client import SidecarBusy, SidecarClient, SidecarRefused, SidecarUnavailable
@@ -154,4 +155,41 @@ async def test_close_cancels(sidecar: FakeSidecar) -> None:
     first = await anext(stream)
     assert first["type"] == "text"
     await stream.aclose()  # type: ignore[attr-defined]
+    await asyncio.wait_for(sidecar.closed.wait(), 5)
+
+
+async def test_status_surfaces_busy_and_unavailable(sidecar: FakeSidecar) -> None:
+    sidecar.answers[("GET", "/login/status")] = (200, {"connected": False, "error": "busy"})
+    with pytest.raises(SidecarBusy):
+        await client(sidecar).status("claude", user="u")
+    sidecar.answers[("GET", "/login/status")] = (200, {"connected": False, "error": "unavailable"})
+    with pytest.raises(SidecarUnavailable):
+        await client(sidecar).status("claude", user="u")
+
+
+async def test_health_and_prune(sidecar: FakeSidecar) -> None:
+    sidecar.answers[("GET", "/healthz")] = (200, {"ok": True, "safe": {"claude": True}})
+    sidecar.answers[("POST", "/prune")] = (200, {"removed": 2})
+    c = client(sidecar)
+    assert (await c.health())["safe"] == {"claude": True}
+    assert await c.prune(["k1", "k2"]) == 2
+    assert sidecar.requests[-1]["body"] == {"keep": ["k1", "k2"]}
+    sidecar.answers[("POST", "/prune")] = (400, {"error": "refusing to prune every user"})
+    with pytest.raises(SidecarRefused):
+        await c.prune([])
+
+
+async def test_close_hangs_up_inside_a_cancelled_scope(sidecar: FakeSidecar) -> None:
+    sidecar.run_lines = ['{"type": "text", "text": "a"}']
+    sidecar.hang_after_lines = True
+    seen: list[str] = []
+
+    async def consume() -> None:
+        with anyio.CancelScope() as scope:
+            asyncio.get_running_loop().call_later(0.3, scope.cancel)
+            async for event in client(sidecar).run("claude", "x"):
+                seen.append(event["type"])  # the next read hangs until the scope is cancelled
+
+    await consume()
+    assert seen == ["text"]
     await asyncio.wait_for(sidecar.closed.wait(), 5)

@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from agentkit.sidecar.runner import (
+    BACKENDS,
+    USER_RE,
     BadRequest,
     Busy,
     Config,
@@ -71,13 +73,29 @@ class Login:
             return strip_ansi("".join(self.output))
 
     def close(self) -> None:
+        """Stop the CLI. The pty master stays open until the pump has seen the end of the output
+        and calls `free_fd`, so a reused descriptor number is never read or written by a stale
+        owner."""
         release(self.proc)
+
+    def write(self, data: bytes) -> bool:
+        """Send `data` to the CLI's terminal; False when the sign-in is over."""
+        with self.lock:
+            if self.closed:
+                return False
+            try:
+                os.write(self.fd, data)
+            except OSError:
+                return False
+            return True
+
+    def free_fd(self) -> None:
         with self.lock:
             if self.closed:
                 return
             self.closed = True
-        with contextlib.suppress(OSError):
-            os.close(self.fd)
+            with contextlib.suppress(OSError):
+                os.close(self.fd)
 
 
 class Aux:
@@ -244,6 +262,7 @@ class Logins:
             login.drained.set()
             self._drop(key, login)
             login.close()
+            login.free_fd()
             self.aux.forget(*key)
 
     def code(self, user: object, backend: object, code: str, wait: float = 20.0) -> int | None:
@@ -257,10 +276,8 @@ class Logins:
             login = self.running.get(key)
         if login is None:
             raise BadRequest("no sign-in is running; start again")
-        try:
-            os.write(login.fd, code.strip().encode() + b"\r")
-        except OSError as exc:
-            raise BadRequest("no sign-in is running; start again") from exc
+        if not login.write(code.strip().encode() + b"\r"):
+            raise BadRequest("no sign-in is running; start again")
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline and login.proc.poll() is None:
             time.sleep(0.1)
@@ -330,3 +347,40 @@ def logout(cfg: Config, logins: Logins, user: object, backend: object) -> None:
             logins.aux.run(args, directory, name)
     shutil.rmtree(directory, ignore_errors=True)
     logins.aux.forget(key, name)
+
+
+def prune(cfg: Config, logins: Logins, keep: object, min_age_s: float = 600) -> int:
+    """Remove the directories (and logins) of every user not in `keep`: users deleted from the
+    app, or left over from a database that was reset or restored. A directory younger than
+    `min_age_s` stays, as its key may be newer than the app's list. Returns how many went."""
+    if not isinstance(keep, list) or not all(
+        isinstance(k, str) and USER_RE.fullmatch(k) for k in keep
+    ):
+        raise BadRequest("invalid keep list")
+    base = cfg.root / "users"
+    if not base.is_dir():
+        return 0
+    entries = [e for e in base.iterdir() if e.is_dir() and not e.is_symlink()]
+    if not keep and entries:
+        # An empty keep list would wipe every login: most likely a wrong database, not a wish.
+        raise BadRequest("refusing to prune every user")
+    removed, now = 0, time.time()
+    for entry in entries:
+        if entry.name in keep or now - entry.stat().st_mtime < min_age_s:
+            continue
+        for backend in BACKENDS:
+            logins.cancel(entry.name, backend)
+        shutil.rmtree(entry, ignore_errors=True)
+        removed += 1
+    return removed
+
+
+def terminal_login(cfg: Config, user: str, backend: str) -> int:
+    """The interactive fallback: the CLI's own login in this terminal, as that app user."""
+    name = check_backend(backend)
+    directory = prepare(cfg, check_user(user), name)
+    os.chdir(directory / "home")
+    env = child_env(cfg, directory, name)
+    args, env = sandboxed(cfg, login_args(cfg, name), env, directory)
+    os.execvpe(args[0], args, env)
+    return 1
