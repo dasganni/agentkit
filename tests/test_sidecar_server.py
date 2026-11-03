@@ -1,10 +1,12 @@
 """The sidecar over its unix socket with fake Claude Code and Codex executables."""
 
 import json
+import os
 import socket
 import stat
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -95,6 +97,7 @@ def cfg(tmp_path: Path) -> runner.Config:
         path=f"{bins}:/usr/bin:/bin",
         ro_paths=(*runner.SYSTEM_PATHS, str(bins), sys.prefix, sys.base_prefix),
         require_sandbox=False,
+        self_check=False,
         userns="off",
         keep_files=("fake-calls.jsonl",),
     )
@@ -282,3 +285,97 @@ def test_help_lists_the_environment() -> None:
         entry.main(["--help"])
     for name in ("AGENT_SOCKET", "AGENT_SECRET", "AGENT_HOME", "AGENT_MCP_NAME", "AGENT_USERNS"):
         assert name in out.getvalue()
+
+
+def test_non_ascii_secret_is_refused(client: httpx.Client) -> None:
+    res = client.get("/healthz", headers={"X-Agent-Secret": "é".encode("latin-1")})
+    assert res.status_code == 403
+
+
+def test_health_matches_what_the_apps_read(client: httpx.Client) -> None:
+    data = client.get("/healthz").json()
+    assert data["installed"] is True
+    assert set(data["sandbox"]) == {"landlock", "min_abi", "bwrap", "required", "active", "reason"}
+    assert "sandbox_problem" in data and data["sandbox_required"] is False
+    assert data["safe"] == {"claude": None, "codex": None} and data["unexpected_tools"] == {}
+
+
+def test_prune_removes_unknown_users(client: httpx.Client, cfg: runner.Config) -> None:
+    users = cfg.root / "users"
+    for name in ("keep", "gone", "fresh"):
+        (users / name / "claude").mkdir(parents=True)
+    old = time.time() - 3600
+    for name in ("keep", "gone"):
+        os.utime(users / name, (old, old))
+    assert client.post("/prune", json={"keep": ["keep"]}).json() == {"removed": 1}
+    assert sorted(p.name for p in users.iterdir()) == ["fresh", "keep"]
+    assert client.post("/prune", json={"keep": []}).status_code == 400
+    assert client.post("/prune", json={"keep": "all"}).status_code == 400
+    assert client.post("/prune", json={"keep": ["../x"]}).status_code == 400
+    assert sorted(p.name for p in users.iterdir()) == ["fresh", "keep"]
+
+
+PROBE_CLAUDE = """\
+import json, os, sys, urllib.request
+sys.stdin.read()
+tools = [{"name": t} for t in "TOOLS".split(",") if t]
+req = urllib.request.Request(
+    os.environ["ANTHROPIC_BASE_URL"] + "/v1/messages",
+    data=json.dumps({"tools": tools}).encode(),
+    headers={"Content-Type": "application/json"},
+)
+try:
+    urllib.request.urlopen(req)
+except Exception:
+    pass
+"""
+
+
+def self_checked(cfg: runner.Config, tools: str) -> Any:
+    fake(Path(cfg.bins["claude"]), PROBE_CLAUDE.replace("TOOLS", tools))
+    cfg = runner.Config(
+        **{**cfg.__dict__, "self_check": True, "bins": {**cfg.bins, "codex": "no-such-codex"}}
+    )
+    srv = server.Server(cfg.socket, cfg)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    http = httpx.Client(
+        transport=httpx.HTTPTransport(uds=cfg.socket),
+        base_url="http://agent",
+        headers={"X-Agent-Secret": SECRET},
+        timeout=60,
+    )
+    for _ in range(300):
+        if http.get("/healthz").json()["safe"]["claude"] is not None:
+            break
+        time.sleep(0.1)
+    return srv, http
+
+
+def test_self_check_refuses_a_backend_with_unexpected_tools(cfg: runner.Config) -> None:
+    srv, http = self_checked(cfg, "Bash,Read")
+    try:
+        health = http.get("/healthz").json()
+        assert health["safe"]["claude"] is False
+        assert health["unexpected_tools"]["claude"] == ["default: Bash", "default: Read"]
+        events = events_of(http.post("/run", json=body(backend="claude")))
+        assert events == [{"type": "error", "code": "unsafe", "message": ""}]
+    finally:
+        http.close()
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_self_check_passes_a_clean_backend(cfg: runner.Config) -> None:
+    srv, http = self_checked(cfg, "")
+    try:
+        health = http.get("/healthz").json()
+        assert health["safe"]["claude"] is True and "claude" not in health["unexpected_tools"]
+        assert health["safe"]["codex"] is False  # not installed
+        events = events_of(http.post("/run", json=body(backend="claude")))
+        assert all(
+            e.get("code") not in ("unsafe", "starting") for e in events
+        )  # the probe CLI says nothing
+    finally:
+        http.close()
+        srv.shutdown()
+        srv.server_close()

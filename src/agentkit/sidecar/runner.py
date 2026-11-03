@@ -169,6 +169,8 @@ class Config:
     status_ttl: float = 30.0
     # More files a run may leave next to the login (tests only).
     keep_files: tuple[str, ...] = ()
+    # Probe each CLI's tool list at start and refuse a backend that offers unexpected tools.
+    self_check: bool = True
 
     @classmethod
     def from_env(cls) -> Config:
@@ -191,6 +193,7 @@ class Config:
             userns=env.get("AGENT_USERNS", "auto"),
             bwrap=env.get("AGENT_BWRAP", "bwrap"),
             max_threads=int(env.get("AGENT_MAX_THREADS", "32")),
+            self_check=env.get("AGENT_SELF_CHECK", "1") != "0",
         )
 
 
@@ -312,8 +315,6 @@ def sandboxed(
     """`args` under Landlock (system paths read-only, only `writable` writable) and, where user
     namespaces work, inside a bubblewrap view that hides the volume. The paths travel in `env`,
     not on the command line, which every process of the uid can read in /proc."""
-    if not cfg.require_sandbox and not sandbox_abi():
-        return args, env
     inner = args
     if sandbox_abi():
         # CA bundles the operator points the CLIs at (proxy setups) must stay readable.
@@ -353,6 +354,23 @@ def sandbox_problem(cfg: Config) -> str | None:
     if not abi:
         return "Landlock is not available on this kernel"
     return f"Landlock ABI {abi} is below {MIN_SANDBOX_ABI} (truncate is not handled)"
+
+
+def sandbox_state(cfg: Config) -> dict[str, Any]:
+    """{landlock, min_abi, bwrap, required, active, reason} for the health report; `reason` is
+    `no_landlock` or `old_landlock` when Landlock falls short."""
+    abi = sandbox_abi()
+    reason = None if abi >= MIN_SANDBOX_ABI else ("no_landlock" if abi < 1 else "old_landlock")
+    bwrap = bwrap_proc(cfg) is not None
+    allowed = reason is None or not cfg.require_sandbox
+    return {
+        "landlock": abi,
+        "min_abi": MIN_SANDBOX_ABI,
+        "bwrap": bwrap,
+        "required": cfg.require_sandbox,
+        "active": allowed and (abi > 0 or bwrap),
+        "reason": reason,
+    }
 
 
 def tidy(directory: Path, backend: str, extra: tuple[str, ...] = ()) -> None:
@@ -420,14 +438,18 @@ def release(proc: subprocess.Popen[bytes]) -> None:
 
 
 def run_tracked(
-    args: list[str], timeout: float, **kwargs: Any
+    args: list[str], timeout: float, input: bytes | None = None, **kwargs: Any
 ) -> subprocess.CompletedProcess[bytes]:
-    """subprocess.run, with the process registered and its whole group killed at the end."""
-    proc = spawn(
-        args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs
-    )
+    """subprocess.run, with the process registered and its whole group killed at the end.
+    Standard input is closed and output captured unless `input` or `kwargs` say otherwise."""
+    options: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL if input is None else subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    } | kwargs
+    proc = spawn(args, **options)
     try:
-        out, err = proc.communicate(timeout=timeout)
+        out, err = proc.communicate(input, timeout=timeout)
         return subprocess.CompletedProcess(args, proc.returncode, out or b"", err or b"")
     finally:
         release(proc)
@@ -1071,6 +1093,8 @@ class Runtime:
         self.cfg = cfg
         self.slots = Slots(cfg.max_per_user, cfg.max_global)
         self.catalog = Catalog(cfg)
+        # The error code a run of a backend is refused with beyond the sandbox (the self-check).
+        self.refusal: Callable[[str], str | None] = lambda backend: None
 
     def installed(self, backend: str) -> bool:
         return shutil.which(self.cfg.bins[backend], path=self.cfg.path) is not None
@@ -1105,6 +1129,9 @@ class Runtime:
             return
         if req.backend == "codex" and not self.catalog.ensure():
             yield {"type": "error", "code": "unsafe", "message": ""}
+            return
+        if code := self.refusal(req.backend):
+            yield {"type": "error", "code": code, "message": ""}
             return
         if not self.slots.acquire(req.user):
             yield {"type": "error", "code": "busy", "message": ""}

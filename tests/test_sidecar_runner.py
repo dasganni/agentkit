@@ -542,3 +542,41 @@ def test_sandbox_blocks_files_outside_the_rules(tmp_path: Path) -> None:
         check=False,
     )
     assert done.returncode == 7, done.stderr
+
+
+def test_a_killed_bwrap_probe_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    sandbox._bwrap_proc.clear()
+    killed = subprocess.CompletedProcess([], -9, b"", b"")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: killed)
+    assert sandbox.bwrap_proc("bwrap-probe-test") is None
+    assert "bwrap-probe-test" not in sandbox._bwrap_proc
+    ok = subprocess.CompletedProcess([], 0, b"", b"")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: ok)
+    assert sandbox.bwrap_proc("bwrap-probe-test") == ("--proc", "/proc")
+    sandbox._bwrap_proc.clear()
+
+
+def test_bubblewrap_wraps_even_when_landlock_is_optional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = runner.Config(root=tmp_path / "home", bins={}, require_sandbox=False)
+    monkeypatch.setattr(runner, "sandbox_abi", lambda: 0)
+    monkeypatch.setattr(sandbox, "bwrap_proc", lambda _: ("--proc", "/proc"))
+    args, _ = runner.sandboxed(cfg, ["claude"], {}, tmp_path, cwd=tmp_path)
+    assert args[0] == "bwrap" and args[-1] == "claude"
+
+
+def test_tool_names_reads_nested_and_namespaced_tools() -> None:
+    from agentkit.sidecar.selfcheck import tool_names
+
+    request = {
+        "tools": [{"name": "a"}, {"type": "web_search"}, "junk"],
+        "input": [
+            {
+                "type": "additional_tools",
+                "tools": [{"type": "namespace", "name": "ns", "tools": [{"name": "t"}]}],
+            },
+            {"tools": [{"type": "namespace", "name": "empty", "tools": []}]},
+        ],
+    }
+    assert tool_names(request) == ["a", "web_search", "ns.t", "empty"]

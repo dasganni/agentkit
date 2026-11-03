@@ -130,7 +130,7 @@ _bwrap_proc: dict[str, tuple[str, ...] | None] = {}
 
 def bwrap_proc(bwrap: str) -> tuple[str, ...] | None:
     """The /proc mount arguments with which `bwrap` can create its namespaces here, or None.
-    A definite answer is kept; a timeout is probed again next time."""
+    A definite answer is kept; a timeout or a kill is probed again next time."""
     if bwrap in _bwrap_proc:
         return _bwrap_proc[bwrap]
     for proc in _PROC_MOUNTS:
@@ -151,6 +151,8 @@ def bwrap_proc(bwrap: str) -> tuple[str, ...] | None:
             return None
         except OSError:
             break
+        if done.returncode < 0:
+            return None  # killed by a signal (e.g. the orphan reaper): not an answer, probe again
         if done.returncode == 0:
             _bwrap_proc[bwrap] = proc
             return proc

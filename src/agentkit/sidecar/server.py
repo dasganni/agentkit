@@ -1,7 +1,8 @@
 """HTTP server of the sidecar on a unix socket, guarded by the shared secret.
 
 Endpoints: POST /run (NDJSON events), POST /login/start, POST /login/code, GET /login/status,
-POST /logout, GET /models?backend=, GET /healthz (also /health). Standard library only.
+POST /logout, POST /prune {keep: [user keys]}, GET /models?backend=, GET /healthz (also /health).
+Standard library only.
 The socket lives on a volume shared with the app and nothing else; every request must carry the
 secret in `X-Agent-Secret`.
 
@@ -22,6 +23,8 @@ Environment:
   AGENT_MAX_THREADS       open connections at once (default 32)
   AGENT_REQUIRE_SANDBOX   0 accepts a kernel without Landlock ABI 3 (default 1: refuse to run)
   AGENT_USERNS            bubblewrap layer on top of Landlock: auto, on or off (default auto)
+  AGENT_SELF_CHECK        0 skips the start-up tool self-check (default 1: a backend whose CLI
+                          offers unexpected tools is refused as unsafe)
   AGENT_BWRAP             bubblewrap executable (default bwrap)
   AGENT_RO_PATHS          more read-only paths for the CLIs, colon separated
   PATH, HTTPS_PROXY, HTTP_PROXY, NO_PROXY, SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, TZ
@@ -48,6 +51,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from agentkit.sidecar import login, runner
 from agentkit.sidecar.runner import BadRequest, Busy, Config, Runtime
+from agentkit.sidecar.selfcheck import Health, self_check
 
 log = logging.getLogger("agent-runner")
 MAX_BODY = 1_000_000
@@ -60,6 +64,12 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.cfg = cfg
         self.runtime = Runtime(cfg)
         self.logins = login.Logins(cfg)
+        self.health = Health(cfg)
+        self.runtime.refusal = self.health.refusal
+        if cfg.self_check:
+            threading.Thread(
+                target=self_check, args=(self.runtime, self.health), daemon=True
+            ).start()
         self.threads = threading.BoundedSemaphore(cfg.max_threads)
         if os.path.exists(path):
             os.unlink(path)
@@ -114,7 +124,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorised(self) -> bool:
         secret = self.server.cfg.secret
-        if not secret or not hmac.compare_digest(self.headers.get("X-Agent-Secret", ""), secret):
+        given = self.headers.get("X-Agent-Secret", "").encode("latin-1", "replace")
+        if not secret or not hmac.compare_digest(given, secret.encode()):
             self._json(403, {"error": "forbidden"})
             return False
         return True
@@ -136,13 +147,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _health(self) -> dict[str, Any]:
         cfg, runtime = self.server.cfg, self.server.runtime
+        backends = {b: runtime.installed(b) for b in runner.BACKENDS}
         return {
             "ok": True,
-            "backends": {b: runtime.installed(b) for b in runner.BACKENDS},
-            "sandbox": runner.sandbox_abi(),
+            "backends": backends,
+            "installed": backends["claude"],
+            "sandbox": runner.sandbox_state(cfg),
             "sandbox_problem": runner.sandbox_problem(cfg),
             "sandbox_required": cfg.require_sandbox,
-            "bwrap": runner.bwrap_proc(cfg) is not None,
+            **self.server.health.report(),
         }
 
     def do_GET(self) -> None:
@@ -182,6 +195,11 @@ class Handler(BaseHTTPRequestHandler):
                 req = runner.RunRequest.parse(body)
                 self.server.runtime.validate(req)
                 self._run(req)
+            elif path == "/prune":
+                self._json(
+                    200,
+                    {"removed": login.prune(self.server.cfg, self.server.logins, body.get("keep"))},
+                )
             elif path in ("/login/start", "/login/code", "/logout"):
                 self._login(path, body)
             else:
@@ -259,7 +277,11 @@ def serve() -> int:
         write_secret(Path(cfg.socket).with_name("agent.secret"), cfg.secret)
     runner.become_subreaper()
     with Server(cfg.socket, cfg) as server:
-        if runner.sandbox_problem(cfg) is None and server.runtime.installed("codex"):
+        if (
+            not cfg.self_check
+            and runner.sandbox_problem(cfg) is None
+            and server.runtime.installed("codex")
+        ):
             threading.Thread(target=server.runtime.catalog.ensure, daemon=True).start()
         signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())
         log.info("agent sidecar listening")
