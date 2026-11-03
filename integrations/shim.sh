@@ -111,7 +111,8 @@ newest_cached() {
 }
 
 mkdir -p "$CACHE" || fail 3 "cannot create $CACHE"
-url=$(server_url "$(login_url_arg "$@")")
+login_url=$(login_url_arg "$@")
+url=$(server_url "$login_url")
 [ -z "$url" ] || check_url "$url"
 now=$(date +%s)
 last=0
@@ -125,7 +126,7 @@ version=""
 if [ -n "$url" ]; then
   if [ $((now - last)) -lt "$CHECK_SECONDS" ] && [ -r "$CACHE/latest" ]; then
     version=$(cat "$CACHE/latest")
-  elif [ $((now - failed)) -ge "$RETRY_SECONDS" ]; then
+  elif [ $((now - failed)) -ge "$RETRY_SECONDS" ] || [ -n "$login_url" ] || [ -z "$(newest_cached)" ]; then
     vtmp=$(mktemp "$CACHE/version.XXXXXX") || fail 3 "cannot create temp file"
     if fetch "$url/cli/version" "$vtmp"; then
       version=$(tr -d ' \t\r\n' <"$vtmp")

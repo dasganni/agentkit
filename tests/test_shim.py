@@ -208,6 +208,15 @@ def test_shim_failed_check_uses_short_timeout_and_backs_off(
     assert "--connect-timeout 5" in calls[0]
 
 
+def test_shim_backoff_does_not_block_first_install(
+    shim: Path, server: Server, tmp_path: Path
+) -> None:
+    assert run(shim, tmp_path, "http://127.0.0.1:9").returncode == 3
+    result = run(shim, tmp_path, None, "login", "--url", server.url)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"{APP}-1.0.0 login --url {server.url}"
+
+
 def test_shim_download_failure_falls_back_to_cached_version(
     shim: Path, server: Server, tmp_path: Path
 ) -> None:
