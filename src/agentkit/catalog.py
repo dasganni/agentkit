@@ -66,7 +66,8 @@ def _cli(id: str, label: str, provider: str, efforts: tuple[str, ...]) -> ModelI
 
 FALLBACK: dict[str, list[ModelInfo]] = {
     "anthropic": [
-        _api("claude-fable-5-1", "Claude Fable 5.1", None),
+        _api("claude-fable-5-1", "Claude Fable 5.1", ("10.00", "50.00", "0.25", "12.50")),
+        _api("claude-fable-5", "Claude Fable 5", ("10.00", "50.00", "1.00", "12.50")),
         _api("claude-opus-5-5", "Claude Opus 5.5", ("4.00", "20.00", "0.20", "5.00")),
         _api("claude-sonnet-5-5", "Claude Sonnet 5.5", ("2.00", "10.00", "0.20", "2.50")),
         _api("claude-haiku-5-5", "Claude Haiku 5.5", ("0.10", "0.50", "0.01", "0.125")),

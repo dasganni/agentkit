@@ -55,7 +55,7 @@ type apiError struct {
 func (a *App) usage() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: %s [--json] <command> [flags]\n\nAccount commands:\n", a.Name)
-	b.WriteString("  login [--url URL] [--token-stdin]   sign in\n")
+	b.WriteString("  login [--url URL] [--scope S] [--token-stdin]   sign in\n")
 	b.WriteString("  logout                              revoke the grant and forget the login\n")
 	b.WriteString("  status                              show the login and check it\n")
 	b.WriteString("  token revoke                        revoke the grant on the server\n")
@@ -196,6 +196,7 @@ func (a *App) login(ctx context.Context, args []string) error {
 	fs.SetOutput(io.Discard)
 	urlFlag := fs.String("url", "", "server URL")
 	stdin := fs.Bool("token-stdin", false, "read the token from stdin")
+	scope := fs.String("scope", "", "space-separated OAuth scope (default: none)")
 	if err := fs.Parse(args); err != nil {
 		return usageErr("login: %v", err)
 	}
@@ -225,7 +226,7 @@ func (a *App) login(ctx context.Context, args []string) error {
 		}
 		cfg.AccessToken, cfg.RefreshToken, cfg.ClientID, cfg.ExpiresAt = token, "", "", time.Time{}
 	} else {
-		tok, err := a.Login(ctx, oauth.Options{BaseURL: base, ClientName: a.Name, Out: a.Out})
+		tok, err := a.Login(ctx, oauth.Options{BaseURL: base, ClientName: a.Name, Scope: *scope, Out: a.Out})
 		if err != nil {
 			return err
 		}

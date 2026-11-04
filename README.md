@@ -128,7 +128,9 @@ The sidecar image installs agentkit and starts `python -m agentkit.sidecar`.
 ### skillcheck.py
 
 - `check_skills(skill_dirs, schemas, app) -> list[str]` lists every `<app> <tool> [<op>] --<flag>`
-  in `SKILL.md`/`reference.md` that the tool schema lacks; built-in commands and global flags pass.
+  in `SKILL.md`/`reference.md` (fenced blocks and inline code spans) that the tool schema lacks:
+  unknown tools, positional words that are no op of the tool, unknown flags, and boolean flags given
+  a value (`--flag true`; booleans take none). Built-in commands and global flags pass.
 - `scan_tokens(path) -> list[str]`: token-looking strings (`tt_`, `rw_`, `fit_`, `tto_` prefixes,
   Bearer values) in a file or tree. Use both in a test in the app.
 
@@ -139,7 +141,9 @@ One generic binary per app: name, environment prefix and default URL are set wit
 build. Commands: `login`, `logout`, `status`, `token revoke`, `version`, `tools`, one command per
 schema tool (`<app> <tool> [<op>] --<field>`), global `--json`. Exit codes: 1 error, 2 usage, 3 not
 signed in or no server. Login is OAuth with dynamic client registration, PKCE S256 and a loopback
-callback; tokens refresh one minute early and once after a 401. The config file (0600, user config
+callback; `login --scope "<scope>"` sends a space-separated OAuth scope (for example `read`,
+`write` or `admin`) in dynamic client registration and the authorization request, and without it no
+scope is sent; tokens refresh one minute early and once after a 401. The config file (0600, user config
 dir) holds the URL and token; `<PREFIX>_URL` and `<PREFIX>_TOKEN` override it. Every request sends
 `Agent-Protocol`.
 
@@ -181,7 +185,7 @@ The app dumps all of its tools, admin ones included (the server filters per call
 release tarball of the pinned tag and copies it to `/srv/cli-dist`:
 
 ```dockerfile
-FROM golang:1.26.9-alpine AS cli
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS cli
 ADD --checksum=sha256:<tarball sha256> \
     https://github.com/dasganni/agentkit/archive/refs/tags/vX.Y.Z.tar.gz /agentkit.tar.gz
 COPY tools.json /tools.json
@@ -195,7 +199,14 @@ ENV MYAPP_CLI_DIST=/srv/cli-dist
 ```
 
 `scripts/cli-dist.sh APP ENV_PREFIX SCHEMA OUT VERSION` writes `<os>-<arch>` (gzip) and
-`<os>-<arch>.sha256` for linux, darwin and windows on amd64 and arm64, plus a `version` file.
+`<os>-<arch>.sha256` for linux, darwin and windows on amd64 and arm64, plus a `version` file. It
+cross-compiles with `GOOS`/`GOARCH` and `CGO_ENABLED=0`, so the Go stage runs on the build platform
+(`--platform=$BUILDPLATFORM`) and never under emulation. `VERSION` is built into the binary
+(`<app> version` prints it) and is what `/cli/version` serves.
+
+The app server must run without proxy-header rewriting (`uvicorn --no-proxy-headers`, or
+`--forwarded-allow-ips` not covering the proxy): forward-auth trusts the direct peer address, which
+proxy headers would replace with the client address.
 
 ### 4. Plugin shim
 
@@ -220,3 +231,9 @@ agent protocol is a separate integer: `PROTOCOL` in `agentapi.py` and `Protocol`
 `cli/internal/version`. The CLI sends it in `Agent-Protocol`; a server answers 426 outside
 `PROTOCOL_MIN..PROTOCOL`, which tells the user to update the CLI. A breaking protocol change raises
 `PROTOCOL`; `PROTOCOL_MIN` stays as long as old CLIs are still served.
+
+## Changes
+
+- 0.1.1: `login --scope`; `skillcheck` checks positional words and boolean flags with a value;
+  `cli-dist.sh` builds the version into the binary; fallback prices for `claude-fable-5-1` and
+  `claude-fable-5`; docs for cross-compiling Go stage and proxy-header-free servers.

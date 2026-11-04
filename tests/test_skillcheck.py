@@ -8,7 +8,7 @@ SCHEMAS = [
     {
         "name": "accounts",
         "ops": ["list", "add"],
-        "params": {"properties": {"limit": {}, "account_id": {}}},
+        "params": {"properties": {"limit": {}, "account_id": {}, "dry_run": {"type": "boolean"}}},
     },
     {"name": "budget", "params": {"properties": {"month_start": {}}}},
 ]
@@ -61,6 +61,29 @@ def test_matches_go_cli_parser(tmp_path: Path, command: str, fragment: str | Non
         assert problems == []
     else:
         assert len(problems) == 1 and fragment in problems[0]
+
+
+def test_inline_span_and_fenced_commands_checked(tmp_path: Path) -> None:
+    body = "Try `demo accounts bogus` now.\n```sh\ndemo accounts nope\n```\n"
+    problems = check_skills(skill(tmp_path, body), SCHEMAS, "demo")
+    assert [("bogus" in p, "nope" in p) for p in problems] == [(True, False), (False, True)]
+
+
+def test_positional_word_must_be_an_op(tmp_path: Path) -> None:
+    problems = check_skills(skill(tmp_path, "`demo accounts frobnicate`"), SCHEMAS, "demo")
+    assert len(problems) == 1 and "unknown operation 'frobnicate'" in problems[0]
+    assert check_skills(skill(tmp_path, "`demo accounts add`"), SCHEMAS, "demo") == []
+
+
+def test_boolean_flag_takes_no_value(tmp_path: Path) -> None:
+    for value in ("true", "false"):
+        body = f"`demo accounts add --dry_run {value}`"
+        problems = check_skills(skill(tmp_path, body), SCHEMAS, "demo")
+        assert len(problems) == 1 and "boolean flag '--dry_run' takes no value" in problems[0]
+    ok = skill(
+        tmp_path, "`demo accounts add --dry_run --limit 5`\n`demo accounts add --dry_run=true`"
+    )
+    assert check_skills(ok, SCHEMAS, "demo") == []
 
 
 def test_token_scan(tmp_path: Path) -> None:

@@ -27,7 +27,8 @@ def dist(tmp_path: Path) -> Path:
     stub.mkdir()
     go = stub / "go"
     go.write_text(
-        '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && printf binary >"$2"; shift; done\n'
+        '#!/bin/sh\necho "$*" >>"$(dirname "$0")/calls"\n'
+        'while [ $# -gt 0 ]; do [ "$1" = -o ] && printf binary >"$2"; shift; done\n'
     )
     go.chmod(0o755)
     out = tmp_path / "dist"
@@ -49,6 +50,13 @@ def test_version_and_download(dist: Path) -> None:
     assert response.status_code == 200
     assert gzip.decompress(response.content) == b"binary"
     assert response.content == (dist / "linux-amd64").read_bytes()
+
+
+def test_version_is_injected_into_every_build(dist: Path) -> None:
+    calls = (dist.parent / "bin" / "calls").read_text().splitlines()
+    flag = "-X github.com/dasganni/agentkit/cli/internal/version.Version=1.2.3"
+    assert len(calls) == 6 and all(flag in call for call in calls)
+    assert (dist / "version").read_text().strip() == "1.2.3"
 
 
 def test_sha256_matches(dist: Path) -> None:

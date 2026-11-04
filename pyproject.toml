@@ -1,6 +1,6 @@
 [project]
 name = "agentkit"
-version = "0.1.0"
+version = "0.1.1"
 description = "Shared agent runtime, sidecar, agent API and CLI for the apps"
 readme = "README.md"
 license = { text = "MIT" }

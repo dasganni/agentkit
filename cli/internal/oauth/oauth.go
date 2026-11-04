@@ -35,6 +35,8 @@ type Tokens struct {
 type Options struct {
 	BaseURL    string
 	ClientName string
+	// Scope is the space-separated OAuth scope; empty sends none.
+	Scope string
 	HTTP       *http.Client
 	Out        io.Writer
 	// Open starts the browser; nil uses the platform opener. The URL is always printed.
@@ -97,17 +99,21 @@ func discover(ctx context.Context, hc *http.Client, baseURL string) (*metadata, 
 	return m, nil
 }
 
-func register(ctx context.Context, hc *http.Client, m *metadata, name, redirect string) (string, error) {
+func register(ctx context.Context, hc *http.Client, m *metadata, name, redirect, scope string) (string, error) {
 	if m.RegistrationEndpoint == "" {
 		return "", errors.New("the server offers no client registration")
 	}
-	body, _ := json.Marshal(map[string]any{
+	meta := map[string]any{
 		"client_name":                name,
 		"redirect_uris":              []string{redirect},
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": "none",
-	})
+	}
+	if scope != "" {
+		meta["scope"] = scope
+	}
+	body, _ := json.Marshal(meta)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.RegistrationEndpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return "", err
@@ -205,7 +211,7 @@ func Login(ctx context.Context, o Options) (*Tokens, error) {
 	}
 	defer ln.Close()
 	redirect := fmt.Sprintf("http://%s/callback", ln.Addr().String())
-	clientID, err := register(ctx, hc, m, o.ClientName, redirect)
+	clientID, err := register(ctx, hc, m, o.ClientName, redirect, o.Scope)
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +234,9 @@ func Login(ctx context.Context, o Options) (*Tokens, error) {
 		"state": state, "resource": Resource(o.BaseURL),
 	} {
 		q.Set(k, v)
+	}
+	if o.Scope != "" {
+		q.Set("scope", o.Scope)
 	}
 	authURL.RawQuery = q.Encode()
 

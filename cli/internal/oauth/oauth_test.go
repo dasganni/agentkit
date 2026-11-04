@@ -108,6 +108,51 @@ func TestLoginFullFlow(t *testing.T) {
 	}
 }
 
+func TestLoginSendsScope(t *testing.T) {
+	var regScope, authScope string
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"authorization_endpoint": srv.URL + "/a", "token_endpoint": srv.URL + "/t",
+			"registration_endpoint": srv.URL + "/r",
+		})
+	})
+	mux.HandleFunc("/r", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		regScope, _ = body["scope"].(string)
+		_ = json.NewEncoder(w).Encode(map[string]string{"client_id": "cid"})
+	})
+	mux.HandleFunc("/a", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		authScope = q.Get("scope")
+		http.Redirect(w, r, q.Get("redirect_uri")+"?code=c&state="+url.QueryEscape(q.Get("state")), http.StatusFound)
+	})
+	mux.HandleFunc("/t", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"at","refresh_token":"rt","expires_in":60}`))
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	_, err := Login(context.Background(), Options{
+		BaseURL: srv.URL, Scope: "read write", Wait: 5 * time.Second,
+		Open: func(u string) error {
+			go func() {
+				if resp, err := http.Get(u); err == nil {
+					resp.Body.Close()
+				}
+			}()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regScope != "read write" || authScope != "read write" {
+		t.Fatalf("registration %q authorization %q", regScope, authScope)
+	}
+}
+
 func TestLoginTimesOut(t *testing.T) {
 	srv := newServer(t, "")
 	_, err := Login(context.Background(), Options{

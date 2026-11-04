@@ -21,7 +21,7 @@ for os in linux darwin windows; do
     name="$os-$arch"
     bin="$work/$name"
     CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
-      -ldflags "-s -w -X main.app=$app -X main.envPrefix=$prefix" -o "$bin" ./cmd/agentcli
+      -ldflags "-s -w -X main.app=$app -X main.envPrefix=$prefix -X github.com/dasganni/agentkit/cli/internal/version.Version=$version" -o "$bin" ./cmd/agentcli
     gzip -9 -n -c "$bin" >"$out/$name"
     (cd "$out" && sha256sum "$name" >"$name.sha256")
   done

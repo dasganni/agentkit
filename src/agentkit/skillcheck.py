@@ -21,6 +21,13 @@ def _props(schema: Any) -> set[str]:
     return set()
 
 
+def _booleans(schema: Any) -> set[str]:
+    if not isinstance(schema, dict):
+        return set()
+    props = schema.get("properties") or {}
+    return {n for n, p in props.items() if isinstance(p, dict) and p.get("type") == "boolean"}
+
+
 def _until_shell_break(words: list[str]) -> list[str]:
     """The words of the first command; a pipe, redirect or `&&` ends it."""
     for index, word in enumerate(words):
@@ -59,10 +66,14 @@ def _check_command(words: list[str], tools: dict[str, dict[str, Any]]) -> Iterat
         yield problem
         if problem.startswith("unknown operation"):
             return
-    for word in after:
+    booleans = _booleans(tool.get("params"))
+    for index, word in enumerate(after):
         match = _FLAG.match(word)
         if match and match.group(1) not in allowed:
             yield f"unknown flag '--{match.group(1)}' for {app} {rest[0]}"
+        elif match and word == f"--{match.group(1)}" and match.group(1) in booleans:
+            if after[index + 1 : index + 2] in (["true"], ["false"]):
+                yield f"boolean flag '--{match.group(1)}' takes no value for {app} {rest[0]}"
 
 
 def _op_problem(app: str, tool: str, ops: list[str], after: list[str]) -> str | None:

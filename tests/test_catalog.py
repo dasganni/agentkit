@@ -137,9 +137,13 @@ async def test_sidecar_list_and_fallback() -> None:
 
 
 def test_fallback_has_prices_for_claude_api_models() -> None:
-    priced = [m for m in FALLBACK["anthropic"] if m.id != "claude-fable-5-1"]
-    assert len(priced) == 3
-    assert all(m.input_per_mtok and m.cache_write_per_mtok for m in priced)
+    priced = {m.id: m for m in FALLBACK["anthropic"]}
+    assert len(priced) == 5
+    assert all(m.input_per_mtok and m.cache_write_per_mtok for m in priced.values())
+    fable = priced["claude-fable-5-1"]
+    assert (fable.input_per_mtok, fable.cache_write_per_mtok) == (Decimal("10"), Decimal("12.5"))
+    assert (fable.cache_read_per_mtok, fable.output_per_mtok) == (Decimal("0.25"), Decimal("50"))
+    assert priced["claude-fable-5"].cache_read_per_mtok == Decimal("1")
 
 
 def test_cost_counts_cache_tokens() -> None:

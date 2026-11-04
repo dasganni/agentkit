@@ -1,7 +1,7 @@
 // Package version holds the CLI release and the agent protocol version.
 package version
 
-const (
-	Version  = "0.1.0"
-	Protocol = 1
-)
+// Version is the release; cli-dist.sh overrides it with -ldflags -X.
+var Version = "0.1.1"
+
+const Protocol = 1

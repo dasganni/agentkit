@@ -199,6 +199,21 @@ func TestLoginTokenStdin(t *testing.T) {
 	}
 }
 
+func TestLoginPassesScope(t *testing.T) {
+	e := setup(t, "http://example.test")
+	var got string
+	e.app.Login = func(_ context.Context, o oauth.Options) (*oauth.Tokens, error) {
+		got = o.Scope
+		return &oauth.Tokens{AccessToken: "tok"}, nil
+	}
+	if code := e.run("login", "--scope", "read write"); code != 0 || got != "read write" {
+		t.Fatalf("%d scope %q", code, got)
+	}
+	if code := e.run("login"); code != 0 || got != "" {
+		t.Fatalf("default scope %q", got)
+	}
+}
+
 func TestLoginBrowserFlowStoresTokens(t *testing.T) {
 	e := setup(t, "http://example.test")
 	if code := e.run("login"); code != 0 {
