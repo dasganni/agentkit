@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -55,7 +56,7 @@ type apiError struct {
 func (a *App) usage() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Usage: %s [--json] <command> [flags]\n\nAccount commands:\n", a.Name)
-	b.WriteString("  login [--url URL] [--scope S] [--token-stdin]   sign in\n")
+	b.WriteString("  login [--url URL] [--scope S] [--paste] [--no-browser] [--token-stdin]   sign in\n")
 	b.WriteString("  logout                              revoke the grant and forget the login\n")
 	b.WriteString("  status                              show the login and check it\n")
 	b.WriteString("  token revoke                        revoke the grant on the server\n")
@@ -197,6 +198,8 @@ func (a *App) login(ctx context.Context, args []string) error {
 	urlFlag := fs.String("url", "", "server URL")
 	stdin := fs.Bool("token-stdin", false, "read the token from stdin")
 	scope := fs.String("scope", "", "space-separated OAuth scope (default: none)")
+	paste := fs.Bool("paste", false, "also accept the pasted callback URL from stdin")
+	noBrowser := fs.Bool("no-browser", false, "print the URL, do not open a browser")
 	if err := fs.Parse(args); err != nil {
 		return usageErr("login: %v", err)
 	}
@@ -226,7 +229,11 @@ func (a *App) login(ctx context.Context, args []string) error {
 		}
 		cfg.AccessToken, cfg.RefreshToken, cfg.ClientID, cfg.ExpiresAt = token, "", "", time.Time{}
 	} else {
-		tok, err := a.Login(ctx, oauth.Options{BaseURL: base, ClientName: a.Name, Scope: *scope, Out: a.Out})
+		o := oauth.Options{BaseURL: base, ClientName: a.Name, Scope: *scope, Out: a.Out, NoBrowser: *noBrowser}
+		if *paste || isTerminal(a.In) {
+			o.Paste = a.In
+		}
+		tok, err := a.Login(ctx, o)
 		if err != nil {
 			return err
 		}
@@ -290,4 +297,14 @@ func (a *App) status(ctx context.Context) error {
 	}
 	fmt.Fprintln(a.Out, "state: ok")
 	return nil
+}
+
+// isTerminal reports whether r is a character device such as an interactive terminal.
+func isTerminal(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }

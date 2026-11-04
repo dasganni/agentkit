@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -175,5 +176,93 @@ func TestRefreshReuseMeansLoggedOut(t *testing.T) {
 	srv := newServer(t, "invalid_grant")
 	if _, err := Refresh(context.Background(), nil, srv.URL, "cid", "rt1"); err != ErrLoggedOut {
 		t.Fatalf("err %v", err)
+	}
+}
+
+type syncBuilder struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuilder) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuilder) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// pasteLogin runs Login without a browser; feed gets the printed authorization URL and
+// returns the text pasted on stdin.
+func pasteLogin(t *testing.T, srv *httptest.Server, feed func(authURL string) string) (*Tokens, string, error) {
+	t.Helper()
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	var out syncBuilder
+	go func() {
+		for i := 0; i < 500; i++ {
+			lines := strings.Split(out.String(), "\n")
+			if len(lines) > 2 && strings.HasPrefix(lines[2], "On another machine?") {
+				// The other machine's browser visits the authorization URL; the redirect fails there.
+				hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+				if resp, err := hc.Get(lines[1]); err == nil {
+					resp.Body.Close()
+				}
+				_, _ = io.WriteString(pw, feed(lines[1]))
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	tok, err := Login(context.Background(), Options{
+		BaseURL: srv.URL, Out: &out, NoBrowser: true, Paste: pr, Wait: 2 * time.Second,
+		Open: func(string) error { t.Error("browser opened"); return nil },
+	})
+	return tok, out.String(), err
+}
+
+func callbackFor(authURL, code, state string) string {
+	u, _ := url.Parse(authURL)
+	q := u.Query()
+	if state == "" {
+		state = q.Get("state")
+	}
+	return q.Get("redirect_uri") + "?code=" + code + "&state=" + url.QueryEscape(state) + "\n"
+}
+
+func TestLoginPaste(t *testing.T) {
+	srv := newServer(t, "")
+	tok, out, err := pasteLogin(t, srv, func(a string) string { return callbackFor(a, "thecode", "") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.AccessToken != "at1" || !strings.Contains(out, "paste the address your browser could not open here") {
+		t.Fatalf("%+v %q", tok, out)
+	}
+}
+
+func TestLoginPasteGarbageAndWrongStateKeepWaiting(t *testing.T) {
+	srv := newServer(t, "")
+	tok, out, err := pasteLogin(t, srv, func(a string) string {
+		return "garbage\n" + callbackFor(a, "evil", "other") + callbackFor(a, "thecode", "")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.AccessToken != "at1" || !strings.Contains(out, "not the callback address") ||
+		!strings.Contains(out, "state mismatch") {
+		t.Fatalf("%+v %q", tok, out)
+	}
+}
+
+func TestLoginPasteWrongStateIsRefused(t *testing.T) {
+	srv := newServer(t, "")
+	_, out, err := pasteLogin(t, srv, func(a string) string { return callbackFor(a, "thecode", "other") })
+	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(out, "state mismatch") {
+		t.Fatalf("%v %q", err, out)
 	}
 }

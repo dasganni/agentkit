@@ -3,6 +3,7 @@
 package oauth
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -41,6 +42,11 @@ type Options struct {
 	Out        io.Writer
 	// Open starts the browser; nil uses the platform opener. The URL is always printed.
 	Open func(url string) error
+	// NoBrowser prints the URL without trying to open a browser.
+	NoBrowser bool
+	// Paste, when set, is read line by line for the callback URL a browser on another
+	// machine failed to open; the loopback callback and a pasted URL race.
+	Paste io.Reader
 	// Wait bounds the wait for the callback; zero means five minutes.
 	Wait time.Duration
 }
@@ -250,12 +256,18 @@ func Login(ctx context.Context, o Options) (*Tokens, error) {
 		out = io.Discard
 	}
 	fmt.Fprintf(out, "Open this URL to sign in:\n%s\n", authURL.String())
-	open := o.Open
-	if open == nil {
-		open = openBrowser
+	fmt.Fprintln(out, "On another machine? Open the URL there, then paste the address your browser could not open here.")
+	if !o.NoBrowser {
+		open := o.Open
+		if open == nil {
+			open = openBrowser
+		}
+		if err := open(authURL.String()); err != nil {
+			fmt.Fprintf(out, "Could not open a browser (%v); open the URL manually.\n", err)
+		}
 	}
-	if err := open(authURL.String()); err != nil {
-		fmt.Fprintf(out, "Could not open a browser (%v); open the URL manually.\n", err)
+	if o.Paste != nil {
+		go readPasted(o.Paste, state, results, out)
 	}
 
 	select {
@@ -283,19 +295,56 @@ func Login(ctx context.Context, o Options) (*Tokens, error) {
 	}
 }
 
+// evaluate checks the state of a callback query and extracts the code or error.
+func evaluate(q url.Values, state string) (callback, error) {
+	switch {
+	case q.Get("state") != state:
+		return callback{}, errors.New("state mismatch")
+	case q.Get("error") != "":
+		return callback{errText: q.Get("error")}, nil
+	}
+	return callback{code: q.Get("code")}, nil
+}
+
+// readPasted reads pasted callback URLs until one is accepted; bad input is reported
+// and the wait goes on.
+func readPasted(r io.Reader, state string, results chan<- callback, out io.Writer) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(nil, 1<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		u, err := url.Parse(line)
+		if err != nil || u.Scheme == "" || u.Host == "" || u.Query().Get("state") == "" {
+			fmt.Fprintln(out, "That is not the callback address; paste the full URL (http://127.0.0.1:<port>/callback?code=...&state=...).")
+			continue
+		}
+		res, err := evaluate(u.Query(), state)
+		if err != nil {
+			fmt.Fprintf(out, "Pasted address refused: %v. Paste the URL from this login attempt.\n", err)
+			continue
+		}
+		if res.errText == "" && res.code == "" {
+			fmt.Fprintln(out, "The pasted address has no code; paste the full URL.")
+			continue
+		}
+		select {
+		case results <- res:
+		default:
+		}
+		return
+	}
+}
+
 func callbackHandler(state string, results chan<- callback) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		var res callback
-		switch {
-		case q.Get("state") != state:
-			http.Error(w, "state mismatch", http.StatusBadRequest)
+		res, err := evaluate(r.URL.Query(), state)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
-		case q.Get("error") != "":
-			res.errText = q.Get("error")
-		default:
-			res.code = q.Get("code")
 		}
 		fmt.Fprintln(w, "You can close this window and return to the terminal.")
 		select {

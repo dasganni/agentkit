@@ -143,7 +143,11 @@ schema tool (`<app> <tool> [<op>] --<field>`), global `--json`. Exit codes: 1 er
 signed in or no server. Login is OAuth with dynamic client registration, PKCE S256 and a loopback
 callback; `login --scope "<scope>"` sends a space-separated OAuth scope (for example `read`,
 `write` or `admin`) in dynamic client registration and the authorization request, and without it no
-scope is sent; tokens refresh one minute early and once after a 401. The config file (0600, user config
+scope is sent. On a headless host the browser cannot reach the loopback callback: open the printed
+URL on another machine, then paste the address the browser failed to open
+(`http://127.0.0.1:<port>/callback?code=...&state=...`) into the terminal. `login` reads stdin for
+it when stdin is a terminal (always with `--paste`); the state is checked as for the loopback
+callback and the first of loopback or paste wins. `--no-browser` only prints the URL. Tokens refresh one minute early and once after a 401. The config file (0600, user config
 dir) holds the URL and token; `<PREFIX>_URL` and `<PREFIX>_TOKEN` override it. Every request sends
 `Agent-Protocol`.
 
@@ -234,6 +238,7 @@ agent protocol is a separate integer: `PROTOCOL` in `agentapi.py` and `Protocol`
 
 ## Changes
 
+- 0.1.2: `login` accepts the pasted callback URL (headless hosts, `--paste`) and `--no-browser`.
 - 0.1.1: `login --scope`; `skillcheck` checks positional words and boolean flags with a value;
   `cli-dist.sh` builds the version into the binary; fallback prices for `claude-fable-5-1` and
   `claude-fable-5`; docs for cross-compiling Go stage and proxy-header-free servers.
