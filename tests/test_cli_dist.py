@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -20,11 +21,10 @@ def client_for(dist: Path) -> TestClient:
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "cli-dist.sh"
 
 
-@pytest.fixture
-def dist(tmp_path: Path) -> Path:
+def build_dist(tmp_path: Path, schema_text: str = "[]") -> Path:
     """Output of the real scripts/cli-dist.sh with a stub `go` that writes a fixed binary."""
     stub = tmp_path / "bin"
-    stub.mkdir()
+    stub.mkdir(parents=True)
     go = stub / "go"
     go.write_text(
         '#!/bin/sh\necho "$*" >>"$(dirname "$0")/calls"\n'
@@ -33,19 +33,29 @@ def dist(tmp_path: Path) -> Path:
     go.chmod(0o755)
     out = tmp_path / "dist"
     schema = tmp_path / "tools.json"
-    schema.write_text("[]")
+    schema.write_text(schema_text)
     subprocess.run(
         ["sh", str(SCRIPT), "demo", "DEMO", str(schema), str(out), "1.2.3"],
         check=True,
         env={**os.environ, "PATH": f"{stub}:{os.environ['PATH']}"},
     )
+    return out
+
+
+@pytest.fixture
+def dist(tmp_path: Path) -> Path:
+    out = build_dist(tmp_path)
     (out / "secret.gz").write_bytes(b"x")
     return out
 
 
+def published(out: Path) -> str:
+    return (out / "version").read_text().strip()
+
+
 def test_version_and_download(dist: Path) -> None:
     client = client_for(dist)
-    assert client.get("/cli/version").text == "1.2.3"
+    assert client.get("/cli/version").text == published(dist)
     response = client.get("/cli/linux-amd64")
     assert response.status_code == 200
     assert gzip.decompress(response.content) == b"binary"
@@ -54,9 +64,21 @@ def test_version_and_download(dist: Path) -> None:
 
 def test_version_is_injected_into_every_build(dist: Path) -> None:
     calls = (dist.parent / "bin" / "calls").read_text().splitlines()
-    flag = "-X github.com/dasganni/agentkit/cli/internal/version.Version=1.2.3"
+    flag = f"-X github.com/dasganni/agentkit/cli/internal/version.Version={published(dist)}"
     assert len(calls) == 6 and all(flag in call for call in calls)
-    assert (dist / "version").read_text().strip() == "1.2.3"
+
+
+def test_version_format_and_manifest(dist: Path) -> None:
+    version = published(dist)
+    assert re.fullmatch(r"1\.2\.3-[0-9a-f]{8}", version)
+    assert re.fullmatch(r"[0-9A-Za-z._-]+", version)
+    assert (dist / "version").read_text() == version + "\n"
+
+
+def test_version_stable_for_same_inputs_and_changes_with_schema(tmp_path: Path) -> None:
+    a = published(build_dist(tmp_path / "a"))
+    assert a == published(build_dist(tmp_path / "b"))
+    assert a != published(build_dist(tmp_path / "c", '[{"name": "x"}]'))
 
 
 def test_sha256_matches(dist: Path) -> None:

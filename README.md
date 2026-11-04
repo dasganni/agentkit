@@ -205,8 +205,10 @@ ENV MYAPP_CLI_DIST=/srv/cli-dist
 `scripts/cli-dist.sh APP ENV_PREFIX SCHEMA OUT VERSION` writes `<os>-<arch>` (gzip) and
 `<os>-<arch>.sha256` for linux, darwin and windows on amd64 and arm64, plus a `version` file. It
 cross-compiles with `GOOS`/`GOARCH` and `CGO_ENABLED=0`, so the Go stage runs on the build platform
-(`--platform=$BUILDPLATFORM`) and never under emulation. `VERSION` is built into the binary
-(`<app> version` prints it) and is what `/cli/version` serves.
+(`--platform=$BUILDPLATFORM`) and never under emulation. The published version is
+`VERSION-<8 hex>`, the hex being the start of sha256 over agentkit's own version and the schema
+bytes: it changes with the CLI code or the tool schema and is stable for identical inputs. That
+string is built into the binary (`<app> version` prints it) and is what `/cli/version` serves.
 
 The app server must run without proxy-header rewriting (`uvicorn --no-proxy-headers`, or
 `--forwarded-allow-ips` not covering the proxy): forward-auth trusts the direct peer address, which
@@ -238,6 +240,8 @@ agent protocol is a separate integer: `PROTOCOL` in `agentapi.py` and `Protocol`
 
 ## Changes
 
+- 0.1.3: `cli-dist.sh` publishes `VERSION-<8 hex>` derived from agentkit's version and the schema, so
+  `/cli/version` changes with every CLI or schema change and shims fetch the new binary.
 - 0.1.2: `login` accepts the pasted callback URL (headless hosts, `--paste`) and `--no-browser`.
 - 0.1.1: `login --scope`; `skillcheck` checks positional words and boolean flags with a value;
   `cli-dist.sh` builds the version into the binary; fallback prices for `claude-fable-5-1` and
