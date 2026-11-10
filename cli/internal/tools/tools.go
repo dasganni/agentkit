@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -28,6 +29,7 @@ type Prop struct {
 	Type        string `json:"type"`
 	Description string `json:"description"`
 	Enum        []any  `json:"enum"`
+	Encoding    string `json:"contentEncoding"`
 }
 
 // Params is the object schema of a tool's parameters.
@@ -73,7 +75,12 @@ func (t *Tool) fieldNames() []string {
 	return names
 }
 
+func (p Prop) isBase64() bool { return p.Type == "string" && p.Encoding == "base64" }
+
 func typeLabel(p Prop) string {
+	if p.isBase64() {
+		return "base64|@file"
+	}
 	switch p.Type {
 	case "integer":
 		return "int"
@@ -124,7 +131,7 @@ func (t *Tool) Help(app string) string {
 	return b.String()
 }
 
-func parseValue(p Prop, raw string) (any, error) {
+func parseValue(name string, p Prop, raw string) (any, error) {
 	var v any
 	switch p.Type {
 	case "integer":
@@ -158,6 +165,13 @@ func parseValue(p Prop, raw string) (any, error) {
 		}
 	default:
 		v = raw
+		if path, ok := strings.CutPrefix(raw, "@"); ok && p.isBase64() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("--%s: cannot read %s: %w", name, path, err)
+			}
+			v = base64.StdEncoding.EncodeToString(data)
+		}
 	}
 	if len(p.Enum) > 0 {
 		ok := slices.ContainsFunc(p.Enum, func(e any) bool { return fmt.Sprint(e) == fmt.Sprint(v) })
@@ -188,7 +202,7 @@ func (t *Tool) Parse(args []string) (map[string]any, error) {
 	for _, n := range t.fieldNames() {
 		p := t.Params.Properties[n]
 		set := func(raw string) error {
-			v, err := parseValue(p, raw)
+			v, err := parseValue(n, p, raw)
 			if err != nil {
 				return err
 			}

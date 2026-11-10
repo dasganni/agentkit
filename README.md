@@ -149,7 +149,10 @@ URL on another machine, then paste the address the browser failed to open
 it when stdin is a terminal (always with `--paste`); the state is checked as for the loopback
 callback and the first of loopback or paste wins. `--no-browser` only prints the URL. Tokens refresh one minute early and once after a 401. The config file (0600, user config
 dir) holds the URL and token; `<PREFIX>_URL` and `<PREFIX>_TOKEN` override it. Every request sends
-`Agent-Protocol`.
+`Agent-Protocol`. Object and array flags take JSON or `@file` (the file holds the JSON); a string
+flag whose schema has `contentEncoding: "base64"` (help: `base64|@file`) takes either the base64
+text or `@file`, which reads the file and sends it base64-encoded. Other string flags keep a
+leading `@` literally.
 
 ## Adopting agentkit in an app
 
@@ -240,6 +243,7 @@ agent protocol is a separate integer: `PROTOCOL` in `agentapi.py` and `Protocol`
 
 ## Changes
 
+- 0.1.4: string flags with `contentEncoding: "base64"` accept `@file` and send its contents base64-encoded.
 - 0.1.3: `cli-dist.sh` publishes `VERSION-<8 hex>` derived from agentkit's version and the schema, so
   `/cli/version` changes with every CLI or schema change and shims fetch the new binary.
 - 0.1.2: `login` accepts the pasted callback URL (headless hosts, `--paste`) and `--no-browser`.

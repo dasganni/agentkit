@@ -2,6 +2,6 @@
 package version
 
 // Version is the release; cli-dist.sh overrides it with -ldflags -X.
-var Version = "0.1.3"
+var Version = "0.1.4"
 
 const Protocol = 1

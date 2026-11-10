@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,7 +13,7 @@ import (
 const schema = `[{"name":"notes","description":"Notes.","ops":["list","add"],"params":{"type":"object",
 "properties":{"limit":{"type":"integer"},"ratio":{"type":"number"},"text":{"type":"string"},
 "pinned":{"type":"boolean"},"kind":{"type":"string","enum":["todo","idea"]},
-"meta":{"type":"object"},"tags":{"type":"array"}},"required":["text"]}},
+"meta":{"type":"object"},"blob":{"type":"string","contentEncoding":"base64"},"tags":{"type":"array"}},"required":["text"]}},
 {"name":"ping","description":"Ping.","params":{"type":"object","properties":{}}}]`
 
 func load(t *testing.T) []Tool {
@@ -94,5 +95,50 @@ func TestNoOps(t *testing.T) {
 	got, err := Find(load(t), "ping").Parse(nil)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("%v %v", got, err)
+	}
+}
+
+func writeBlob(t *testing.T, data []byte) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "blob.bin")
+	if err := os.WriteFile(file, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+func TestBase64FlagReadsFile(t *testing.T) {
+	data := []byte{0, 1, 2, 0xff, 0xfe, '\n', 0x80}
+	got, err := Find(load(t), "notes").Parse([]string{"add", "--text", "t", "--blob", "@" + writeBlob(t, data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := base64.StdEncoding.DecodeString(got["blob"].(string))
+	if err != nil || !reflect.DeepEqual(dec, data) {
+		t.Fatalf("got %#v, %v", got["blob"], err)
+	}
+}
+
+func TestBase64FlagLiteral(t *testing.T) {
+	got, err := Find(load(t), "notes").Parse([]string{"add", "--text", "t", "--blob", "AAEC"})
+	if err != nil || got["blob"] != "AAEC" {
+		t.Fatalf("got %#v, %v", got, err)
+	}
+	if h := Find(load(t), "notes").Help("demo"); !strings.Contains(h, "--blob base64|@file") {
+		t.Errorf("help lacks base64 label:\n%s", h)
+	}
+}
+
+func TestBase64FlagMissingFile(t *testing.T) {
+	_, err := Find(load(t), "notes").Parse([]string{"add", "--text", "t", "--blob", "@/nonexistent/blob.bin"})
+	if err == nil || !strings.Contains(err.Error(), "--blob") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestPlainStringAtIsLiteral(t *testing.T) {
+	got, err := Find(load(t), "notes").Parse([]string{"add", "--text", "@x"})
+	if err != nil || got["text"] != "@x" {
+		t.Fatalf("got %#v, %v", got, err)
 	}
 }
